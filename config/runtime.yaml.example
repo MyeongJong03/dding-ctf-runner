@@ -1,0 +1,12 @@
+runner:
+  max_workers: 5
+  default_role: helper
+  persistent_docker: true
+  docker_image: ctf-pwn:latest
+  state_db: ~/.ctf-solver/runner-state/queue.sqlite3
+
+guards:
+  require_live_for_network: true
+  require_confirm_for_submit: true
+  redact_cli_output: true
+  keep_private_artifacts_outside_repo: true

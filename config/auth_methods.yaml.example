@@ -1,0 +1,5 @@
+# Legacy auth-only example. Prefer config/platforms.yaml.example for Phase 4.
+
+methods:
+  api_token_file:
+    path: ~/.ctf-solver/secrets/example-api-token.txt

@@ -1,0 +1,17 @@
+[project]
+name = "dding-ctf-runner"
+version = "0.1.0"
+description = "Shell-first competition CTF runner scaffold with guarded platform automation."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+ctfctl = "ctf_runner.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"

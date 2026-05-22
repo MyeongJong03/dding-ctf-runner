@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+usage:
+  scripts/ctf-worker worker-1 interactive [--dry-run]
+  scripts/ctf-worker worker-1 exec '<prompt>'
+  scripts/ctf-worker list
+
+Environment:
+  CTF_CODEX_MODEL=auto    # omit --model and let Codex decide (default)
+  CTF_CODEX_MODEL=<model> # explicit reproducibility override
+  CTF_CODEX_APPROVAL=never|on-request|on-failure|untrusted
+  CTF_CODEX_SANDBOX=workspace-write|read-only|danger-full-access
+  CTF_CODEX_EXTRA_ADD_DIRS=/abs/path1:/abs/path2
+  CTF_CODEX_IGNORE_USER_CONFIG=1
+  CTF_CODEX_DANGER=0    # opt down from default danger-full-access mode
+EOF
+}
+
+warn_plain_codex() {
+  echo "warning: do not start competition workers with plain codex; use scripts/ctf-worker-* wrappers." >&2
+}
+
+cd "$REPO_ROOT"
+if [[ ! -f "$REPO_ROOT/pyproject.toml" || ! -d "$REPO_ROOT/ctf_runner" ]]; then
+  echo "refusing to run outside a dding-ctf-runner checkout" >&2
+  exit 1
+fi
+if [[ "$PWD" == /mnt/c/* ]]; then
+  echo "refusing to run under /mnt/c" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  -h|--help|"")
+    usage
+    exit 0
+    ;;
+  list)
+    warn_plain_codex
+    for worker_id in worker-1 worker-2 worker-3 worker-4 worker-5; do
+      printf '%s CODEX_HOME=%s\n' "$worker_id" "$HOME/.codex-workers/$worker_id"
+    done
+    exit 0
+    ;;
+esac
+
+WORKER_ID="${1:-}"
+shift
+
+case "$WORKER_ID" in
+  worker-1|worker-2|worker-3|worker-4|worker-5)
+    ;;
+  *)
+    echo "unknown worker: $WORKER_ID" >&2
+    echo "allowed workers: worker-1 worker-2 worker-3 worker-4 worker-5" >&2
+    exit 2
+    ;;
+esac
+
+MODE="${1:-interactive}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "$MODE" in
+  interactive)
+    DRY_RUN=0
+    if [[ "${1:-}" == "--dry-run" ]]; then
+      DRY_RUN=1
+      shift
+    fi
+    if [[ $# -ne 0 ]]; then
+      echo "interactive mode only accepts --dry-run" >&2
+      exit 2
+    fi
+    warn_plain_codex
+    export CODEX_HOME="$HOME/.codex-workers/$WORKER_ID"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      exec ./scripts/run-codex-worker.sh --dry-run "$WORKER_ID" interactive
+    fi
+    exec ./scripts/run-codex-worker.sh --run "$WORKER_ID" interactive
+    ;;
+  exec)
+    if [[ $# -ne 1 ]]; then
+      echo "exec mode requires exactly one prompt argument" >&2
+      exit 2
+    fi
+    warn_plain_codex
+    export CODEX_HOME="$HOME/.codex-workers/$WORKER_ID"
+    exec ./scripts/run-codex-worker.sh --run "$WORKER_ID" exec "$1"
+    ;;
+  *)
+    echo "mode must be interactive or exec" >&2
+    exit 2
+    ;;
+esac

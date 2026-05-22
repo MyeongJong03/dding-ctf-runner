@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Model policy is auto/unpinned by default; use CTF_CODEX_MODEL to override.
+exec "$SCRIPT_DIR/ctf-worker" worker-3 interactive "$@"

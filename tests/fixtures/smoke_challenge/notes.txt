@@ -1,0 +1,2 @@
+This fixture contains a dummy flag-shaped value for redaction tests:
+DH{dummy_test_value}

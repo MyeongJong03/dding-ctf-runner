@@ -1,0 +1,16 @@
+# Example Phase 7 platform profile shape.
+# Keep real profiles and auth files outside this repo.
+
+platform: ctfd
+name: example
+base_url: https://ctf.example.com
+auth:
+  method: api_token_file
+  path: ~/.ctf-solver/secrets/ctfd.token
+policy:
+  allow_live_discovery: false
+  allow_live_download: false
+  allow_submission: false
+  allow_instance_start: false
+downloads:
+  root: ~/CTF/contests

@@ -1,0 +1,9 @@
+auto_submit_default: true
+require_high_confidence: true
+max_wrong_per_challenge: 2
+cooldown_seconds: 30
+duplicate_detection: sha256
+submit_requires_live: true
+submit_requires_confirm_or_policy: true
+allow_medium_confidence_when_no_limit: false
+reject_fake_like: true

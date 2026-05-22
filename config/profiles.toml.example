@@ -1,0 +1,16 @@
+# Safe profile template. Store real secrets outside this repository.
+
+[runner]
+state_root = "~/.ctf-solver/runner-state"
+contests_root = "~/CTF/contests"
+docker_workspace_root = "~/CTF/workspaces"
+secrets_root = "~/.ctf-solver/secrets"
+
+[workers.worker-1]
+role = "primary"
+codex_home = "~/.codex-workers/worker-1"
+
+[platforms.example_ctfd]
+type = "ctfd"
+base_url = "https://ctf.example.invalid"
+auth_config = "~/.ctf-solver/secrets/example-auth.yaml"

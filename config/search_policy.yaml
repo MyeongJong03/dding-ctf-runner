@@ -1,0 +1,5 @@
+current_event_writeup_search: forbidden
+official_docs_search: allowed_with_local_evidence
+cve_search: allowed_with_version_evidence
+osint_geo_search: allowed
+max_default_searches_per_challenge: 3
