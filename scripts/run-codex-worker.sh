@@ -95,7 +95,7 @@ add_dir_once() {
   local candidate="$1"
   local existing
   [[ -n "$candidate" ]] || return 0
-  for existing in "${ADD_DIRS[@]}"; do
+  for existing in "${ADD_DIRS[@]:-}"; do
     if [[ "$existing" == "$candidate" ]]; then
       return 0
     fi
@@ -119,9 +119,11 @@ APPROVAL_POLICY="${CTF_CODEX_APPROVAL:-never}"
 SANDBOX_MODE="${CTF_CODEX_SANDBOX:-}"
 normalize_codex_model() {
   local raw="${1:-}"
+  local lowered
   raw="${raw#"${raw%%[![:space:]]*}"}"
   raw="${raw%"${raw##*[![:space:]]}"}"
-  if [[ -z "$raw" || "${raw,,}" == "auto" ]]; then
+  lowered="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$raw" || "$lowered" == "auto" ]]; then
     printf ''
     return 0
   fi

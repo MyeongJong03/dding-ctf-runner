@@ -658,6 +658,22 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         pass
     try:
+        proc = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return False
+        state = (proc.stdout or "").strip()
+        if state and "Z" in state:
+            return False
+    except Exception:  # noqa: BLE001 - fall back to signal probing below.
+        pass
+    try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False

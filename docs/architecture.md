@@ -4,7 +4,7 @@
 
 `~/ctf-solver` remains unchanged and can be used as a library or reference toolbox. This repo provides the competition-specific automation layer around workers and live platform policy.
 
-Local state lives outside git by default in `~/.ctf-solver/runner-state`. Secrets live outside git in `~/.ctf-solver/secrets`. Challenge downloads and workspaces live under `~/CTF/contests` and `~/CTF/workspaces` unless configured otherwise.
+Local state lives outside git by default in `~/.ctf-solver/runner-state`. Secrets live outside git in `~/.ctf-solver/secrets`. Challenge downloads live under `~/CTF/contests` unless configured otherwise. Docker workspaces default to `~/CTF/workspaces` on Linux/WSL and to `~/.ctf-solver/runner-state/docker-workspaces` on macOS so an existing Mac `~/CTF` workspace remains untouched.
 
 ## Run Modes
 

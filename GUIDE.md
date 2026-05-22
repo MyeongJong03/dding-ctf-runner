@@ -54,7 +54,35 @@ Install Playwright only if browser-based discovery or manual storage capture is 
 ./scripts/setup-browser.sh
 ```
 
-## 4. Codex Worker Setup
+## 4. macOS Secondary Runner Setup
+
+Use macOS as a secondary/mobile runner when an existing Mac CTF workspace already
+owns plain `codex`, `~/CTF`, and global Codex instructions. Do not rewrite those
+settings during runner setup.
+
+```bash
+cd ~
+git clone <repo-url> dding-ctf-runner
+cd ~/dding-ctf-runner
+./scripts/setup-browser.sh
+./scripts/init-codex-workers.sh --count 5 --link-auth
+./scripts/ctf-worker-1 --dry-run
+```
+
+For Docker checks on Apple Silicon, keep pool workspaces outside `~/CTF` and
+treat linux/amd64 image warnings as an emulation signal:
+
+```bash
+export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspaces"
+./scripts/ctfctl docker benchmark --image ctf-pwn:latest --json
+./scripts/ctfctl docker pool-smoke --contest-id mac-docker-smoke --workers 2 --json
+./scripts/ctfctl docker pool-stop --contest-id mac-docker-smoke --json
+```
+
+pwn/rev-heavy work remains better suited to the primary Windows WSL runner unless
+Mac Docker timing is validated for that event. See [docs/setup-macos.md](docs/setup-macos.md).
+
+## 5. Codex Worker Setup
 
 Initialize worker homes:
 
@@ -79,7 +107,7 @@ Wrapper defaults:
 
 Do not use plain `codex` for competition workers. It can load unrelated global instructions and bypass runner-specific worker setup.
 
-## 5. Preflight
+## 6. Preflight
 
 Run preflight before rehearsal and before competition:
 
@@ -93,7 +121,7 @@ Expected public-readiness state:
 - `tunnel_provider_missing` can be Medium when no public tunnel provider is installed.
 - `global_long_agents` can be Medium when global instructions are long, as long as worker wrappers are used.
 
-## 6. Platform Profile
+## 7. Platform Profile
 
 Store platform profiles outside the repo:
 
@@ -131,7 +159,7 @@ Check profiles without printing raw auth:
 ./scripts/ctfctl auth storage-check --path ~/.ctf-solver/secrets/<contest>.storage_state.json --json
 ```
 
-## 7. Rehearsal Read-Only Sync
+## 8. Rehearsal Read-Only Sync
 
 Read-only sync can prepare local briefs without arming the contest:
 
@@ -147,7 +175,7 @@ Read-only sync can prepare local briefs without arming the contest:
 
 This should not solve challenges, submit flags, start instances, automate browser login, or expose tunnels.
 
-## 8. Contest Arm And Disarm
+## 9. Contest Arm And Disarm
 
 Prestart checks are local by default:
 
@@ -176,7 +204,7 @@ Competition arm enables live submit by default. Add `--no-live-submit` to solve 
 ./scripts/ctfctl contest disarm --contest-id <contest> --stop-workers --json
 ```
 
-## 9. Worker Execution
+## 10. Worker Execution
 
 Supervisor dry run and apply:
 
@@ -224,7 +252,7 @@ Local fake E2E:
 
 The Docker commands exercise the persistent pool and then stop it. The callback smoke starts a loopback dummy listener, exposes only that listener through the selected provider, sends a safe probe, and cleans up listener/tunnel resources.
 
-## 10. Before First Real Contest
+## 11. Before First Real Contest
 
 Run the final full fake competition rehearsal before using the automation on a real event:
 
@@ -248,7 +276,7 @@ Proceed only after the mock full rehearsal reports `status: ok`, the Codex mini 
 
 Do not prepare a GitHub/public release until the full rehearsal and `scripts/release-check.sh` pass.
 
-## 11. Release And Public Checks
+## 12. Release And Public Checks
 
 Run the release gate before publishing:
 
@@ -275,7 +303,7 @@ git log --stat
 
 If history contains unrelated local runtime material or you are not sure whether old commits are public-safe, create a clean public branch or a fresh repository with a squashed initial commit. Push only source, docs, scripts, tests, and public fixtures.
 
-## 12. Auto-Submit Policy
+## 13. Auto-Submit Policy
 
 Live submit requires:
 
@@ -287,7 +315,7 @@ Live submit requires:
 
 Setup and rehearsal block real submit even when the profile allows submission. The submit policy checks duplicate hashes, confidence, fake-like values, cooldowns, and wrong-answer limits. Public payloads store hashes and redacted summaries only.
 
-## 13. Postsolve And Archive
+## 14. Postsolve And Archive
 
 For solved challenges:
 
@@ -305,11 +333,11 @@ Generated files live under:
 
 They are local-only and ignored. Raw flags are replaced by hashes or redaction placeholders.
 
-## 14. Skill Candidate Review
+## 15. Skill Candidate Review
 
 `skill_candidate.md` is a candidate only. After the contest, review it manually and promote only sanitized reusable patterns. The runner does not modify existing personal skill repositories.
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 Plain Codex loads unrelated global instructions:
 
@@ -349,7 +377,7 @@ Legacy MCP warnings:
 ./scripts/fix-codex-mcp.sh --remove-legacy-dreamhack
 ```
 
-## 16. Safety Checklist
+## 17. Safety Checklist
 
 Before publishing or running a real contest:
 

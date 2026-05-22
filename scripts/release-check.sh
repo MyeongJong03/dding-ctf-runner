@@ -27,7 +27,15 @@ data = json.loads(open(sys.argv[1], encoding="utf-8").read())
 risk = data.get("risk") or {}
 high = list(risk.get("High") or [])
 medium = list(risk.get("Medium") or [])
-allowed_medium = {"tunnel_provider_missing", "global_long_agents", "ctf_pwn_image_missing", "docker_cli_missing", "docker_daemon_unreachable", "docker_socket_permission"}
+allowed_medium = {
+    "tunnel_provider_missing",
+    "global_long_agents",
+    "legacy_dreamhack_solver_mcp",
+    "ctf_pwn_image_missing",
+    "docker_cli_missing",
+    "docker_daemon_unreachable",
+    "docker_socket_permission",
+}
 unexpected_medium = [item for item in medium if item not in allowed_medium]
 print({"High": high, "Medium": medium, "unexpected_medium": unexpected_medium})
 if high or unexpected_medium:

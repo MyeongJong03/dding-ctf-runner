@@ -26,6 +26,13 @@ This repository is intended to be public-safe. Real secrets, browser state, down
 - Playwright/Chromium for optional browser-based read-only discovery or manual storage capture.
 - Optional public tunnel provider only when a challenge explicitly requires it; none is bundled or started automatically.
 
+macOS is supported as a secondary/mobile runner. Keep existing `~/CTF` and
+global Codex settings unchanged, launch workers only through `scripts/ctf-worker-*`,
+and set `CTF_DOCKER_WORKSPACE_ROOT` outside `~/CTF` before Docker pool smoke.
+Apple Silicon can run the linux/amd64 `ctf-pwn:latest` image through Docker
+Desktop emulation, but pwn/rev-heavy work should stay on the primary Windows WSL
+runner unless local timing is known to be acceptable.
+
 ## Quick Start
 
 ```bash
@@ -142,6 +149,7 @@ Before the first public push:
 - [OPERATIONS.md](OPERATIONS.md): short event-day command guide.
 - [docs/architecture.md](docs/architecture.md): system architecture.
 - [docs/setup-windows-wsl.md](docs/setup-windows-wsl.md): WSL and worker setup.
+- [docs/setup-macos.md](docs/setup-macos.md): macOS secondary runner setup.
 - [docs/platform-automation.md](docs/platform-automation.md): platform profiles and read-only sync.
 - [docs/contest-operations.md](docs/contest-operations.md): arm/disarm and worker commands.
 - [docs/postsolve.md](docs/postsolve.md): local-only postsolve and archive policy.

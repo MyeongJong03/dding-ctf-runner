@@ -15,7 +15,7 @@ ctfctl docker pool-start --contest-id <contest> --workers 5 --json
 ctfctl docker pool-exec --contest-id <contest> --worker-id worker-1 --command "file ./chall" --json
 ```
 
-For pwn/rev category claims, the solve prompt includes a safe Docker hint with the contest ID, worker ID, container name, workspace path, and `ctfctl docker pool-exec` form. The worker should keep secrets out of Docker env, command args, logs, and copied files. The pool workspace is `~/CTF/workspaces/<contest>/<worker>` mounted at `/workspace`.
+For pwn/rev category claims, the solve prompt includes a safe Docker hint with the contest ID, worker ID, container name, workspace path, and `ctfctl docker pool-exec` form. The worker should keep secrets out of Docker env, command args, logs, and copied files. The pool workspace is `~/CTF/workspaces/<contest>/<worker>` on Linux/WSL or `~/.ctf-solver/runner-state/docker-workspaces/<contest>/<worker>` on macOS, mounted at `/workspace`.
 
 Flow:
 

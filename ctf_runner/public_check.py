@@ -62,6 +62,7 @@ REQUIRED_FILES = (
 
 REQUIRED_DOCS = (
     "docs/setup-windows-wsl.md",
+    "docs/setup-macos.md",
     "docs/architecture.md",
     "docs/platform-automation.md",
     "docs/worker-loop.md",

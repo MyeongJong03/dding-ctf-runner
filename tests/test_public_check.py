@@ -196,6 +196,7 @@ def _write_required_public_files(root: Path) -> None:
 def _required_docs() -> list[str]:
     return [
         "docs/setup-windows-wsl.md",
+        "docs/setup-macos.md",
         "docs/architecture.md",
         "docs/platform-automation.md",
         "docs/worker-loop.md",

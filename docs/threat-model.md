@@ -81,7 +81,7 @@ Controls:
 - Default public URL output uses a redacted host summary; `--show-public-url` is explicit and still strips query strings before display.
 - Tunnel state, PID files, provider logs, and callback hit JSONL files live under `~/.ctf-solver/runner-state/` and are ignored if a local override places them in the repo.
 - Docker pool state lives under `~/.ctf-solver/runner-state/contests/<contest>/docker/`. It stores container names, worker IDs, image names, workspace paths, lifecycle timestamps, exec counts, average timings, and redacted command output only.
-- Docker pool workspaces live under `~/CTF/workspaces/<contest>/<worker>` and are mounted as `/workspace`. The runner does not pass secret env vars or auth files into pool containers.
+- Docker pool workspaces live under `~/CTF/workspaces/<contest>/<worker>` on Linux/WSL, and under `~/.ctf-solver/runner-state/docker-workspaces/<contest>/<worker>` on macOS, then mount as `/workspace`. The runner does not pass secret env vars or auth files into pool containers.
 - The default Docker mount is the per-worker workspace only. Avoid broad host mounts and avoid `/mnt/c` default workspaces.
 - `ctfctl docker pool-stop` and `contest disarm --stop-docker-pool` are the explicit stale-container cleanup paths.
 - Competition workers run in a dedicated runner repo and add only specific writable directories rather than arbitrary shell state.

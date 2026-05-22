@@ -5,10 +5,19 @@
 - Plain `codex` 금지.
 - Operator는 `ctf-worker-1`로 실행.
 - 실제 작업 repo는 `~/dding-ctf-runner`.
+- MacBook에서는 기존 `~/CTF`/global Codex 세팅을 유지하고 runner wrapper만 사용.
 
 ```bash
 cd ~/dding-ctf-runner
 ctf-worker-1
+```
+
+MacBook secondary/mobile runner에서는 Docker workspace를 `~/CTF` 밖으로 둔다.
+Apple Silicon에서 `ctf-pwn:latest` linux/amd64 이미지는 emulation으로 동작하므로
+pwn/rev-heavy 작업은 Windows WSL을 우선한다.
+
+```bash
+export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspaces"
 ```
 
 ## 2. 대회 profile 준비

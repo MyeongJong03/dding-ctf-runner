@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,10 +58,15 @@ class RunnerPaths:
 
 def get_paths() -> RunnerPaths:
     home = Path.home()
+    default_docker_workspace_root = (
+        home / ".ctf-solver" / "runner-state" / "docker-workspaces"
+        if platform.system() == "Darwin"
+        else home / "CTF" / "workspaces"
+    )
     return RunnerPaths(
         repo=repo_root(),
         state_root=expand(os.environ.get("CTF_RUNNER_STATE_ROOT", home / ".ctf-solver" / "runner-state")),
         contests_root=expand(os.environ.get("CTF_CONTESTS_ROOT", home / "CTF" / "contests")),
-        docker_workspace_root=expand(os.environ.get("CTF_DOCKER_WORKSPACE_ROOT", home / "CTF" / "workspaces")),
+        docker_workspace_root=expand(os.environ.get("CTF_DOCKER_WORKSPACE_ROOT", default_docker_workspace_root)),
         secrets_root=expand(os.environ.get("CTF_RUNNER_SECRETS_ROOT", home / ".ctf-solver" / "secrets")),
     )

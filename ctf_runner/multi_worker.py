@@ -10,7 +10,7 @@ from typing import Any
 
 from .fake_ctfd import FakeCTFdServer, platform_config
 from .ingest import ingest_challenge
-from .paths import repo_root
+from .paths import get_paths
 from .platform_base import action_to_dict
 from .platform_ctfd import CTFdPlatform
 from .redact import redact_text
@@ -428,7 +428,7 @@ def _bounded_int(value: int | None, *, default: int, minimum: int, maximum: int)
 
 def _default_run_root(prefix: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return repo_root() / "state" / prefix / f"{stamp}-{int(time.time() * 1000) % 1000:03d}"
+    return get_paths().state_root / prefix / f"{stamp}-{int(time.time() * 1000) % 1000:03d}"
 
 
 def _counts(values: Any) -> dict[str, int]:
