@@ -2,6 +2,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+source "$REPO_ROOT/scripts/lib/macos-fd-limit.sh"
+ctf_runner_raise_macos_fd_limit
 if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
   PYTHON="$REPO_ROOT/.venv/bin/python"
 else

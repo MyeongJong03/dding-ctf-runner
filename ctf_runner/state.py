@@ -34,10 +34,18 @@ def default_db_path() -> Path:
     return get_paths().db_path
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = Path(db_path).expanduser() if db_path else default_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")

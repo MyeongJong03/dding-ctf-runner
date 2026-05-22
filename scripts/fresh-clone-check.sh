@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEEP_DIR=0
 DEST=""
 
+source "$ROOT/scripts/lib/macos-fd-limit.sh"
+ctf_runner_raise_macos_fd_limit
+
 usage() {
   cat <<'EOF'
 Usage: scripts/fresh-clone-check.sh [--keep-dir] [--dest DIR]

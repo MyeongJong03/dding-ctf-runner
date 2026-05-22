@@ -713,8 +713,7 @@ def _public_ingest(ingest: dict[str, Any]) -> dict[str, Any]:
 def _duplicate_submission_count(db_path: Path) -> int:
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT challenge_id, flag_hash, COUNT(*) AS count
@@ -729,8 +728,7 @@ def _duplicate_submission_count(db_path: Path) -> int:
 def _handoff_event_count(db_path: Path) -> int:
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect(db_path) as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS count FROM events WHERE event_type='challenge_stalled' AND status='stalled'"
         ).fetchone()
@@ -810,8 +808,7 @@ def _challenge_failure_summary(worker_results: list[dict[str, Any]], *, db_path:
 
 
 def _challenge_failure_summary_from_db(db_path: Path) -> list[dict[str, Any]]:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect(db_path) as conn:
         challenges = conn.execute(
             "SELECT id, status FROM challenges ORDER BY id"
         ).fetchall()

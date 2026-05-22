@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,7 +13,7 @@ from .paths import get_paths
 from .platform_base import action_to_dict
 from .platform_ctfd import CTFdPlatform
 from .redact import redact_text
-from .state import init_db, list_status, update_challenge_ingested, upsert_platform_challenges, utc_now
+from .state import connect, init_db, list_status, update_challenge_ingested, upsert_platform_challenges, utc_now
 from .worker_loop import run_worker_once
 
 
@@ -351,15 +350,13 @@ def _submission_counts(db_path: str | Path | None) -> dict[str, int]:
     path = Path(db_path).expanduser() if db_path else None
     if path is None or not path.exists():
         return {}
-    with sqlite3.connect(path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect(path) as conn:
         rows = conn.execute("SELECT status, COUNT(*) AS count FROM submissions GROUP BY status").fetchall()
     return {str(row["status"]): int(row["count"]) for row in rows}
 
 
 def _duplicate_claim_count(db_path: Path) -> int:
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
+    with connect(db_path) as conn:
         rows = conn.execute(
             """
             SELECT challenge_id, COUNT(*) AS count

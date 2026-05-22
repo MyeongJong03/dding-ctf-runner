@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+source "$ROOT/scripts/lib/macos-fd-limit.sh"
+ctf_runner_raise_macos_fd_limit
+
 tmpdir="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmpdir"

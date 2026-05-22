@@ -30,3 +30,14 @@ def test_handoff_jsonl_hash_only(tmp_path: Path):
     assert hash_flag(candidate) in text
     assert loaded["flag_hashes"] == [hash_flag(candidate)]
     assert record["challenge_id"] == "handoff-test"
+
+
+def test_handoff_creates_parent_directory(tmp_path: Path):
+    run_dir = tmp_path / "nested" / "run"
+    record = write_handoff(run_dir, "mkdir-test", {"status": "stalled"}, "needs handoff")
+
+    handoff = run_dir / "handoff.jsonl"
+    assert handoff.exists()
+    loaded = json.loads(handoff.read_text(encoding="utf-8"))
+    assert loaded["challenge_id"] == "mkdir-test"
+    assert record["challenge_id"] == "mkdir-test"

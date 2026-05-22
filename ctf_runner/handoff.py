@@ -24,7 +24,8 @@ def write_handoff(run_dir: str | Path, challenge_id: str, result: dict[str, Any]
     }
     path = Path(run_dir).expanduser() / "handoff.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.open("a", encoding="utf-8").write(json.dumps(record, sort_keys=True) + "\n")
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
     return record
 
 
