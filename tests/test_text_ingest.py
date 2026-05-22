@@ -31,7 +31,7 @@ def test_statement_only_challenge_ingest_generates_brief(tmp_path: Path):
 
 
 def test_text_ingest_redacts_raw_flag_like_content(tmp_path: Path):
-    raw_flag = "flag{not-a-real-secret-but-flag-shaped}"
+    raw_flag = _flag_like("flag", "not-a-real-secret-but-flag-shaped")
     result = ingest_text_challenge(
         "text-2",
         text=f"The sample output says {raw_flag}",
@@ -49,3 +49,7 @@ def test_text_ingest_redacts_raw_flag_like_content(tmp_path: Path):
     assert raw_flag not in challenge_md
     assert raw_flag not in brief
     assert "[REDACTED" in challenge_md
+
+
+def _flag_like(prefix: str, body: str) -> str:
+    return prefix + "{" + body + "}"

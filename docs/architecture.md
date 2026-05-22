@@ -12,7 +12,7 @@ Local state lives outside git by default in `~/.ctf-solver/runner-state`. Secret
 
 - `setup`: local fake/mock tests, profile checks, and real read-only discovery are allowed. Real platform download/ingest requires `--allow-real-readonly`. Real challenge solve, live submit, instance start, browser login automation, and public tunnel exposure are blocked.
 - `rehearsal`: real platform read-only discovery, download, and ingest are allowed. Real challenge solve remains blocked unless a one-shot worker uses `--allow-real-solve-dry-run`, and live submit remains blocked.
-- `competition`: real challenge solve can run only after `--confirm-competition` and an armed contest control state. Live submit also needs the armed contest to allow live submit, `--confirm-submit` or the platform submit confirmation, platform policy, and submit-policy approval. Instance start likewise needs an armed contest that allows instance start plus platform policy.
+- `competition`: real challenge solve can run only after `--confirm-competition` and an armed contest control state. Live submit is enabled by default when the contest is armed, unless `--no-live-submit` is used, and still needs profile submission policy plus submit-policy approval. Instance start likewise needs an armed contest that allows instance start plus platform policy.
 
 The mode guard is enforced in the CLI and worker loop. A setup-mode worker that claims a real platform challenge stops before prompt construction or solver execution and records `blocked_by_mode`.
 
@@ -101,7 +101,7 @@ Phase 6 adds a dry-run-first worker solve loop:
 3. `ctf_runner.solve_prompt` builds a bounded prompt from challenge metadata and the brief.
 4. A solver backend runs. The default `mock` backend is deterministic and does not call external services. The `codex` backend is blocked unless `--allow-codex-call` is present for one explicit call through the runner wrapper.
 5. `ctf_runner.solve_result` parses solver output, detects flag-like candidates, and creates hash/redacted candidate objects for display and state.
-6. The worker calls submit policy planning. Local fake CTFd loopback submits are allowed only through explicit worker flags and confirmation; nonlocal live submit remains gated.
+6. The worker calls submit policy planning. In armed competition, supervisor workers include live-submit and confirm-submit flags by default when the arm state allows it; setup/rehearsal and profile policy still block real submit.
 7. Accepted local fake submits become `solved`; planned non-submitted candidates become `submit_planned`; no candidate or blocked-only candidates become `stalled` with a compact handoff. Errors become `error`.
 8. Worker events are written to SQLite and JSONL telemetry with redacted/hash-only details.
 

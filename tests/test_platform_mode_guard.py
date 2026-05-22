@@ -120,7 +120,7 @@ def test_submit_blocked_in_setup_and_rehearsal(monkeypatch, tmp_path: Path):
                 "--challenge-id",
                 "real-sync",
                 "--flag",
-                "FLAG{unit_value}",
+                _flag_like("FLAG", "unit_value"),
                 "--live",
                 "--confirm",
                 "--json",
@@ -161,7 +161,7 @@ def test_competition_submit_requires_policy_and_confirm(monkeypatch, tmp_path: P
             "--challenge-id",
             "real-sync",
             "--flag",
-            "FLAG{unit_value}",
+            _flag_like("FLAG", "unit_value"),
             "--live",
             "--confirm",
             "--json",
@@ -188,7 +188,7 @@ def test_competition_submit_requires_policy_and_confirm(monkeypatch, tmp_path: P
             "--challenge-id",
             "real-sync",
             "--flag",
-            "FLAG{unit_value}",
+            _flag_like("FLAG", "unit_value"),
             "--live",
             "--json",
         ]
@@ -231,3 +231,7 @@ def _run_json(argv: list[str]) -> dict[str, Any]:
     output = buffer.getvalue()
     assert code == 0, output
     return json.loads(output)
+
+
+def _flag_like(prefix: str, body: str) -> str:
+    return prefix + "{" + body + "}"

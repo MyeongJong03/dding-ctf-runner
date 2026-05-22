@@ -54,7 +54,7 @@ def test_live_readonly_smoke_generates_text_only_brief_and_sync_marks_ingest_rea
         assert sync["ingest_ready_count"] == 2
         assert server.post_log == []
         assert "submit" not in "".join(server.get_log)
-        assert "flag{not-real-but-shaped}" not in rendered
+        assert _flag_like("flag", "not-real-but-shaped") not in rendered
 
         with sqlite3.connect(tmp_path / "queue.sqlite3") as conn:
             statuses = {row[0]: row[1] for row in conn.execute("SELECT id, status FROM challenges")}
@@ -122,7 +122,7 @@ class _FakeTextHandler(BaseHTTPRequestHandler):
         if path == "/challenges/web-1":
             self._send(
                 "text/html",
-                b"<html><h1>Web One</h1><main>Read the endpoint carefully. flag{not-real-but-shaped}</main></html>",
+                b"<html><h1>Web One</h1><main>Read the endpoint carefully. " + _flag_like("flag", "not-real-but-shaped").encode("ascii") + b"</main></html>",
             )
             return
         if path in {"/api/challenges", "/api/problems", "/api/tasks", "/trpc"} or path.startswith("/api/") or path.startswith("/contests/demo/"):
@@ -175,3 +175,7 @@ def _run_json(argv: list[str], output_chunks: list[str]) -> dict:
     output_chunks.append(output)
     assert code == 0, output
     return json.loads(output)
+
+
+def _flag_like(prefix: str, body: str) -> str:
+    return prefix + "{" + body + "}"

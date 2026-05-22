@@ -1,16 +1,37 @@
-# Example Phase 7 platform profile shape.
+# Example Phase 7 platform profiles.
 # Keep real profiles and auth files outside this repo.
 
+# Read-only profile: safe for setup/rehearsal sync. It can discover and
+# download according to policy, but live submission remains blocked.
 platform: ctfd
-name: example
+name: example-readonly
 base_url: https://ctf.example.com
 auth:
   method: api_token_file
-  path: ~/.ctf-solver/secrets/ctfd.token
+  path: ~/.ctf-solver/secrets/example.token
 policy:
-  allow_live_discovery: false
-  allow_live_download: false
+  allow_live_discovery: true
+  allow_live_download: true
   allow_submission: false
+  allow_instance_start: false
+downloads:
+  root: ~/CTF/contests
+
+---
+
+# Competition profile: use only for the real solve window. Submission is
+# still blocked in setup/rehearsal; in competition it also requires an armed
+# contest, submit policy approval, and the runner live-submit gate.
+platform: ctfd
+name: example-competition
+base_url: https://ctf.example.com
+auth:
+  method: api_token_file
+  path: ~/.ctf-solver/secrets/example.token
+policy:
+  allow_live_discovery: true
+  allow_live_download: true
+  allow_submission: true
   allow_instance_start: false
 downloads:
   root: ~/CTF/contests

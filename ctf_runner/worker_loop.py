@@ -736,20 +736,7 @@ def _live_submit_ready_reason(*, platform: Any | None, confirm_submit: bool) -> 
         return "missing_platform_config"
     if not confirm_submit:
         return "live_submit_requires_confirm"
-    base_url = str(getattr(platform, "base_url", "") or "")
-    if not _is_loopback_url(base_url) and not bool(getattr(platform, "policy", {}).get("allow_worker_nonlocal_submission")):
-        return "worker_live_submit_requires_loopback_platform"
     return "ok"
-
-
-def _is_loopback_url(value: str) -> bool:
-    try:
-        from urllib.parse import urlsplit
-
-        host = urlsplit(value).hostname
-    except ValueError:
-        return False
-    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 def _submission_evidence_context(challenge: dict[str, Any], platform: Any | None) -> dict[str, Any]:

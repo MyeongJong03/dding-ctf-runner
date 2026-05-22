@@ -1,6 +1,6 @@
 # Submit Policy
 
-Phase 5 implements controlled auto-submit. The runner can plan and execute guarded CTFd submissions, but a live submission must pass local policy, platform policy, and operator confirmation gates.
+Phase 5 implements controlled auto-submit. The runner can plan and execute guarded CTFd submissions. In setup and rehearsal, real live submission is blocked. In armed competition, supervisor workers request live submit by default, but a candidate must still pass local policy, platform policy, and confirmation gates.
 
 Confidence tiers:
 
@@ -16,7 +16,15 @@ Guards:
 - `reject_fake_like` blocks fake/test/example/dummy/placeholder-style candidates even when they match the regex.
 - `require_high_confidence` blocks medium and low confidence candidates by default.
 - `submit_requires_live` keeps platform submit dry-run unless `--live` is present.
-- `submit_requires_confirm_or_policy` requires `--confirm` unless the platform config has an explicit unconfirmed-submit policy override.
+- `submit_requires_confirm_or_policy` requires confirmation unless the platform config has an explicit unconfirmed-submit policy override. `contest start-workers` adds worker submit confirmation automatically when competition live submit is enabled.
+
+Competition defaults:
+
+- `contest arm --confirm-competition` sets `allow_live_submit: true`.
+- `contest arm --no-live-submit` keeps solving without automatic live submit.
+- `policy.allow_submission: true` permits worker auto-submit only in competition.
+- `policy.allow_submission: false` blocks worker submit even in competition.
+- Medium confidence remains blocked by default.
 
 State and output rules:
 
@@ -36,7 +44,7 @@ Example dry-run:
 ctfctl platform submit --config contests/<id>/platform.local.yaml --challenge-id 123 --flag '<candidate>'
 ```
 
-Example live submit after policy review:
+Example manual live submit after policy review:
 
 ```bash
 ctfctl platform submit --config contests/<id>/platform.local.yaml --challenge-id 123 --flag '<candidate>' --live --confirm

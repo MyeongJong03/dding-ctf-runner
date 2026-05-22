@@ -43,7 +43,7 @@ def test_armed_without_allow_live_submit_never_posts(tmp_path: Path):
     with FakeCTFdServer(correct_flag=candidate) as server:
         profile.write_text(json.dumps(platform_config(server.base_url, contests)), encoding="utf-8")
         _real_platform_challenge(db, contests, CHALLENGE_ID)
-        arm_contest("real-contest", profile_path=profile, confirm_competition=True, state_root=state_root)
+        arm_contest("real-contest", profile_path=profile, confirm_competition=True, allow_live_submit=False, state_root=state_root)
 
         result = run_worker_once(
             "worker-test",

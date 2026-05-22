@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from ctf_runner.cli import main
+from ctf_runner.contest_control import record_prestart
 from ctf_runner.worker_supervisor import start_worker_process, worker_status, workers_root
 
 
@@ -89,6 +90,133 @@ def test_real_platform_unarmed_start_blocked(monkeypatch, tmp_path: Path):
     assert result["reason"] == "contest_not_armed"
 
 
+def test_armed_competition_defaults_live_submit_worker_command(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(tmp_path / "state"))
+    profile = _write_profile(tmp_path, allow_submission=True)
+    armed, arm_code = _run_json(
+        [
+            "contest",
+            "arm",
+            "--contest-id",
+            "real-platform",
+            "--profile",
+            str(profile),
+            "--confirm-competition",
+            "--json",
+        ]
+    )
+    assert arm_code == 0
+    assert armed["control"]["allow_live_submit"] is True
+
+    result, code = _run_json(
+        [
+            "--db",
+            str(tmp_path / "queue.sqlite3"),
+            "contest",
+            "start-workers",
+            "--contest-id",
+            "real-platform",
+            "--dry-run",
+            "--workers",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    assert result["run_mode"] == "competition"
+    assert result["live_submit_default"] is True
+    assert result["live_submit_effective"] is True
+    assert result["confirm_submit_effective"] is True
+    command = result["workers"][0]["command_redacted"]
+    assert "--live-submit" in command
+    assert "--confirm-submit" in command
+
+
+def test_no_live_submit_arm_disables_worker_live_submit(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(tmp_path / "state"))
+    profile = _write_profile(tmp_path, allow_submission=True)
+    armed, arm_code = _run_json(
+        [
+            "contest",
+            "arm",
+            "--contest-id",
+            "real-platform",
+            "--profile",
+            str(profile),
+            "--confirm-competition",
+            "--no-live-submit",
+            "--json",
+        ]
+    )
+    assert arm_code == 0
+    assert armed["control"]["allow_live_submit"] is False
+
+    result, code = _run_json(
+        [
+            "--db",
+            str(tmp_path / "queue.sqlite3"),
+            "contest",
+            "start-workers",
+            "--contest-id",
+            "real-platform",
+            "--dry-run",
+            "--workers",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    assert result["run_mode"] == "competition"
+    assert result["live_submit_default"] is False
+    assert result["live_submit_effective"] is False
+    command = result["workers"][0]["command_redacted"]
+    assert "--live-submit" not in command
+    assert "--confirm-submit" not in command
+
+
+def test_setup_and_rehearsal_worker_commands_do_not_live_submit(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(tmp_path / "state"))
+    profile = _write_profile(tmp_path, allow_submission=True)
+
+    setup, setup_code = _run_json(
+        [
+            "contest",
+            "start-workers",
+            "--contest-id",
+            "real-platform",
+            "--dry-run",
+            "--workers",
+            "1",
+            "--json",
+        ]
+    )
+    assert setup_code == 0
+    assert setup["run_mode"] == "setup"
+    assert setup["live_submit_default"] is False
+    assert "--live-submit" not in setup["workers"][0]["command_redacted"]
+
+    record_prestart("real-platform", profile_path=profile, run_mode="rehearsal", state_root=tmp_path / "state")
+    rehearsal, rehearsal_code = _run_json(
+        [
+            "contest",
+            "start-workers",
+            "--contest-id",
+            "real-platform",
+            "--dry-run",
+            "--workers",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert rehearsal_code == 0
+    assert rehearsal["run_mode"] == "rehearsal"
+    assert rehearsal["live_submit_default"] is False
+    assert "--live-submit" not in rehearsal["workers"][0]["command_redacted"]
+
+
 def test_disarm_stop_workers_stops_process(monkeypatch, tmp_path: Path):
     state_root = tmp_path / "state"
     monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(state_root))
@@ -115,3 +243,28 @@ def _run_json(argv: list[str]) -> tuple[dict, int]:
         code = main(argv)
     raw = stdout.getvalue()
     return json.loads(raw), code
+
+
+def _write_profile(tmp_path: Path, *, allow_submission: bool) -> Path:
+    profile = tmp_path / "platform.yaml"
+    profile.write_text(
+        "\n".join(
+            [
+                "platform: generic",
+                "name: example",
+                "base_url: https://ctf.example.com",
+                "contest_url: https://ctf.example.com/contest",
+                "auth:",
+                "  method: manual",
+                "policy:",
+                "  allow_live_discovery: true",
+                "  allow_live_download: true",
+                f"  allow_submission: {str(allow_submission).lower()}",
+                "  allow_instance_start: false",
+                "downloads:",
+                f"  root: {tmp_path / 'contests'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return profile

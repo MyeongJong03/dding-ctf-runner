@@ -131,8 +131,8 @@ Auto-submit risks and controls:
 - Decoy flags: `reject_fake_like` and confidence classification block placeholder, example, dummy, and bait-like candidates.
 - Flag leakage: raw flags stay in memory only for the immediate submit call; DB rows, CLI output, and summaries store hashes and redacted previews.
 - Duplicate spam: `duplicate_detection: sha256` blocks repeated terminal submissions of the same candidate.
-- Accidental live action: live submit requires `--live`, an armed contest with live submit enabled, platform `allow_submission`, submit confirmation, and submit-policy approval.
-- Mode confusion: setup and rehearsal block real live submit before platform submit code is called; competition submit requires contest arm, `--confirm-competition`, submit confirmation, and platform policy.
+- Accidental live action: competition auto-submit is now default after arm, so the controls are the arm state, `--no-live-submit` opt-out, platform `allow_submission`, worker confirmation, and submit-policy approval.
+- Mode confusion: setup and rehearsal block real live submit before platform submit code is called; competition submit requires contest arm, `--confirm-competition`, profile policy, and submit policy.
 - Stale arm lock: operators should run `ctfctl contest status --contest-id <id> --json` before starting workers and `ctfctl contest disarm --contest-id <id> --json` after the event.
 
 Concurrent worker risks and controls:
@@ -142,7 +142,7 @@ Concurrent worker risks and controls:
 - Runaway supervisor workers: `worker-status`, `worker-logs`, `restart-worker`, `stop-workers`, and `disarm --stop-workers` provide explicit lifecycle control.
 - Stale PID confusion: supervisor status treats dead PIDs as exited or stale and updates status files before reporting counts.
 - Log leakage: worker loop output is already public/redacted, and `worker-logs` redacts tail output before display. Runtime log files remain outside git and must be treated as local-only.
-- Accidental live submit from background workers: live submit still requires contest arm, `allow_live_submit`, `--confirm-submit`, platform policy, and submit policy approval; supervisor command files store only the boolean mode, not raw candidates.
+- Accidental live submit from background workers: supervised competition workers include `--live-submit` and `--confirm-submit` by default only when the armed contest has `allow_live_submit`; profile policy and submit policy still gate the endpoint call, and command files do not store raw candidates.
 - Stale arm lock plus background workers: operators should check `contest status`, review `running_worker_count`, and disarm with `--stop-workers` after the event.
 - Duplicate submit race: workers use per-challenge flag hashes and already-solved state before live submit. The fake CTFd smoke also verifies already-solved responses.
 - Raw flag leakage in handoff: handoffs use `public_solver_result`, facts/attempts are redacted, and candidates are stored as hashes only.

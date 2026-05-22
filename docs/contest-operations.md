@@ -61,7 +61,7 @@ Arm only when the event is ready for actual solving:
   --json
 ```
 
-Add `--allow-live-submit` only after the platform profile policy and submit policy are ready for real submissions. Add `--allow-instance-start` only when instance start is explicitly allowed by platform policy and contest rules.
+Competition arm enables the runner live-submit gate by default. Add `--no-live-submit` when you want real solving without automatic submissions, or keep the platform profile at `policy.allow_submission: false`. `--allow-live-submit` is still accepted for older operator prompts. Add `--allow-instance-start` only when instance start is explicitly allowed by platform policy and contest rules.
 
 The arm command writes local control state only. It does not start workers or submit anything.
 
@@ -112,6 +112,8 @@ For a real armed competition, inspect the dry-run command first, then apply:
   --postsolve \
   --json
 ```
+
+In an armed competition with live submit enabled, the dry-run JSON reports `live_submit_default: true`, and each worker command includes `--live-submit` and `--confirm-submit`. If the contest was armed with `--no-live-submit`, those flags are omitted.
 
 Monitor and control workers:
 
@@ -175,12 +177,12 @@ Cleanup stops active callback listeners and tunnel provider processes, updates s
 Live submit requires all gates:
 
 - contest is armed
-- arm state has `allow_live_submit: true`
-- worker submit uses `--confirm-submit` or platform submit uses `--confirm`
+- arm state has `allow_live_submit: true`; competition arm sets this by default unless `--no-live-submit` is used
+- worker submit uses the internal `--confirm-submit` added by `contest start-workers`; manual platform submit uses `--confirm`
 - platform profile has `policy.allow_submission: true`
 - submit policy passes confidence, duplicate hash, cooldown, wrong-limit, and fake-like checks
 
-Without all gates, the runner records a blocked or planned submit and must not call the live submit endpoint.
+Setup and rehearsal block real live submit before platform submit code is called. Without all competition gates, the runner records a blocked or planned submit and must not call the live submit endpoint.
 
 ## Disarm
 
@@ -236,7 +238,6 @@ Use a fake/example profile for arm smoke tests:
   --contest-id local-fake \
   --profile config/platforms.yaml.example \
   --confirm-competition \
-  --allow-live-submit \
   --max-workers 3 \
   --max-parallel-codex 2 \
   --json

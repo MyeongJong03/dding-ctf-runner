@@ -42,8 +42,8 @@ def start_workers(
     stop_when_empty: bool = True,
     allow_codex_call: bool = False,
     postsolve: bool | None = None,
-    live_submit: bool = False,
-    confirm_submit: bool = False,
+    live_submit: bool | None = None,
+    confirm_submit: bool | None = None,
     platform_config_path: str | Path | None = None,
     db_path: str | Path | None = None,
     contests_root: str | Path | None = None,
@@ -63,10 +63,14 @@ def start_workers(
         }
     count = _bounded_int(workers if workers is not None else control.get("max_workers"), default=5, minimum=1, maximum=10)
     solver = solver if solver in {"mock", "codex"} else "mock"
-    run_mode = "competition" if armed else "setup"
+    control_run_mode = str(control.get("run_mode") or "setup")
+    run_mode = "competition" if armed else ("rehearsal" if control_run_mode == "rehearsal" else "setup")
     max_parallel = _bounded_int(max_parallel_codex if max_parallel_codex is not None else control.get("max_parallel_codex"), default=2, minimum=1, maximum=count)
     profile_path = str(platform_config_path or control.get("profile_path") or "")
-    live_submit_enabled = bool(live_submit and (fake_local or (armed and bool(control.get("allow_live_submit")))))
+    live_submit_default = bool(run_mode == "competition" and armed and bool(control.get("allow_live_submit")))
+    live_submit_requested = live_submit_default if live_submit is None else bool(live_submit)
+    live_submit_enabled = bool(live_submit_requested and (fake_local or (armed and bool(control.get("allow_live_submit")))))
+    confirm_submit_enabled = bool(confirm_submit) if confirm_submit is not None else live_submit_enabled
     command_items: list[dict[str, Any]] = []
     for index in range(1, count + 1):
         worker_id = f"worker-{index}"
@@ -81,7 +85,7 @@ def start_workers(
             allow_codex_call=allow_codex_call,
             postsolve=postsolve,
             live_submit=live_submit_enabled,
-            confirm_submit=confirm_submit,
+            confirm_submit=confirm_submit_enabled,
             platform_config_path=profile_path,
             db_path=db_path,
             contests_root=contests_root,
@@ -94,6 +98,7 @@ def start_workers(
             "mode": run_mode,
             "solver": solver,
             "live_submit": command["live_submit"],
+            "confirm_submit": command["confirm_submit"],
             "postsolve": command["postsolve"],
             "max_iterations": command["max_iterations"],
             "log_path": _display_path(_worker_paths(contest_id, worker_id, state_root=state_root)["log"]),
@@ -110,6 +115,7 @@ def start_workers(
                     "max_iterations": command["max_iterations"],
                     "max_parallel_codex": max_parallel,
                     "live_submit": command["live_submit"],
+                    "confirm_submit": command["confirm_submit"],
                     "postsolve": command["postsolve"],
                     "profile_path": profile_path,
                 },
@@ -128,6 +134,10 @@ def start_workers(
         "worker_count": count,
         "solver": solver,
         "max_parallel_codex": max_parallel,
+        "live_submit_default": live_submit_default,
+        "live_submit_requested": live_submit_requested,
+        "live_submit_effective": live_submit_enabled,
+        "confirm_submit_effective": confirm_submit_enabled,
         "workers": command_items,
         "paths": {"workers_root": _display_path(workers_root(contest_id, state_root=state_root))},
     }
@@ -206,6 +216,7 @@ def build_worker_loop_command(
         "max_iterations": iterations,
         "postsolve": postsolve_enabled,
         "live_submit": bool(live_submit),
+        "confirm_submit": bool(confirm_submit),
     }
 
 

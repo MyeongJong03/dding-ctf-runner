@@ -115,7 +115,7 @@ def check_action_allowed(
         if mode in {"setup", "rehearsal"}:
             return _block(
                 f"{mode}_blocks_live_submit",
-                ("--mode competition", "--confirm-competition", "--confirm-submit"),
+                ("--mode competition", "--confirm-competition"),
                 mode,
                 action,
                 target_kind,
@@ -139,7 +139,7 @@ def check_action_allowed(
         if not _flag(flags, "allow_live_submit"):
             return _block(
                 "contest_live_submit_not_allowed",
-                ("ctfctl contest arm --allow-live-submit",),
+                ("ctfctl contest arm --confirm-competition", "omit --no-live-submit or pass --allow-live-submit"),
                 mode,
                 action,
                 target_kind,

@@ -54,6 +54,7 @@ SENSITIVE_GLOBS = (
 REQUIRED_FILES = (
     "README.md",
     "GUIDE.md",
+    "OPERATIONS.md",
     "pyproject.toml",
     "uv.lock",
     ".gitignore",
@@ -118,7 +119,7 @@ CONTENT_SECRET_RE = re.compile(
 )
 
 CONTENT_ALLOW_PREFIXES = ("docs/", "tests/", "config/", "ctf_runner/", "scripts/")
-CONTENT_ALLOW_FILES = (".gitignore", "README.md", "GUIDE.md")
+CONTENT_ALLOW_FILES = (".gitignore", "README.md", "GUIDE.md", "OPERATIONS.md")
 
 PUBLIC_DOC_FLAG_RE = re.compile(r"\b[A-Za-z0-9_]{2,32}\{[^{}\s]{4,256}\}")
 REAL_CTF_DOC_RE = re.compile(r"\b(hack\s*for\s*a\s*change|hackforachange|h4c)\b", re.IGNORECASE)
@@ -396,7 +397,7 @@ def _public_doc_findings(root: Path, paths: Sequence[str]) -> list[dict[str, Any
     findings: list[dict[str, Any]] = []
     for path in paths:
         normalized = path.replace("\\", "/")
-        if normalized not in {"README.md", "GUIDE.md"} and not normalized.startswith("docs/"):
+        if normalized not in {"README.md", "GUIDE.md", "OPERATIONS.md"} and not normalized.startswith("docs/"):
             continue
         file_path = root / normalized
         if not file_path.is_file():

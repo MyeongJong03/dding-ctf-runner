@@ -75,7 +75,7 @@ def test_arm_requires_confirm(monkeypatch, tmp_path: Path):
     assert result["reason"] == "confirm_competition_required"
 
 
-def test_arm_writes_control_and_lock(monkeypatch, tmp_path: Path):
+def test_arm_defaults_allow_live_submit_true(monkeypatch, tmp_path: Path):
     state_root = tmp_path / "runner-state"
     monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(state_root))
     profile = _write_profile(tmp_path)
@@ -89,7 +89,6 @@ def test_arm_writes_control_and_lock(monkeypatch, tmp_path: Path):
             "--profile",
             str(profile),
             "--confirm-competition",
-            "--allow-live-submit",
             "--max-workers",
             "3",
             "--max-parallel-codex",
@@ -109,6 +108,53 @@ def test_arm_writes_control_and_lock(monkeypatch, tmp_path: Path):
     assert control["run_mode"] == "competition"
     assert control["allow_live_submit"] is True
     assert control["max_workers"] == 3
+
+
+def test_arm_no_live_submit_sets_false(monkeypatch, tmp_path: Path):
+    state_root = tmp_path / "runner-state"
+    monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(state_root))
+    profile = _write_profile(tmp_path)
+
+    result, code, _ = _run_json(
+        [
+            "contest",
+            "arm",
+            "--contest-id",
+            "example",
+            "--profile",
+            str(profile),
+            "--confirm-competition",
+            "--no-live-submit",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    assert result["status"] == "armed"
+    assert result["control"]["allow_live_submit"] is False
+
+
+def test_arm_allow_live_submit_still_works(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("CTF_RUNNER_STATE_ROOT", str(tmp_path / "runner-state"))
+    profile = _write_profile(tmp_path)
+
+    result, code, _ = _run_json(
+        [
+            "contest",
+            "arm",
+            "--contest-id",
+            "example",
+            "--profile",
+            str(profile),
+            "--confirm-competition",
+            "--allow-live-submit",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    assert result["status"] == "armed"
+    assert result["control"]["allow_live_submit"] is True
 
 
 def test_disarm_clears_armed(monkeypatch, tmp_path: Path):

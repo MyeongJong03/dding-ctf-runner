@@ -265,9 +265,9 @@ Instancer behavior:
 Submit behavior:
 
 - Real submit is forbidden during live-readonly rehearsal.
-- Keep `policy.allow_submission: false` in real profiles until the controlled submit phase.
-- Live submit requires all of: armed contest control state, `allow_live_submit` in that arm state, `--confirm-submit` for worker submits or `--confirm` for `platform submit`, `policy.allow_submission: true`, and submit-policy approval.
-- `ctfctl contest arm --allow-live-submit` does not submit anything and does not change the platform profile; it only enables the runner-side gate for a later confirmed submit.
+- Use `policy.allow_submission: false` for read-only profiles and `policy.allow_submission: true` only for competition profiles that should auto-submit.
+- Live submit requires all of: armed contest control state, `allow_live_submit` in that arm state, worker confirmation from `contest start-workers` or `--confirm` for manual `platform submit`, `policy.allow_submission: true`, and submit-policy approval.
+- `ctfctl contest arm` enables the runner-side live-submit gate by default in competition. Use `--no-live-submit` to arm without automatic submissions; `--allow-live-submit` remains a compatibility spelling.
 - Existing submit dry-runs and fake local submits remain test-only guardrails; do not use them against a real platform in this phase.
 
 ## Public Release Checks

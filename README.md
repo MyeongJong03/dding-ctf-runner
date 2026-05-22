@@ -47,6 +47,8 @@ python3 -m pip install -e . pytest
 
 Use only the `scripts/ctf-worker-*` wrappers for competition workers. Plain `codex` can load unrelated global instructions and is not the runner control surface.
 
+For real event day commands, use [OPERATIONS.md](OPERATIONS.md).
+
 ## Modes And Gates
 
 - `setup`: configure local tools and profiles. Real challenge solving, live submit, instance start, browser login automation, and public tunnels are blocked.
@@ -58,10 +60,12 @@ Use only the `scripts/ctf-worker-*` wrappers for competition workers. Plain `cod
 Live submit requires every gate:
 
 - contest is armed
-- arm state allows live submit
-- submit command includes explicit confirmation
+- arm state allows live submit, which is the competition arm default unless `--no-live-submit` is used
+- worker submit uses the built-in competition confirmation; manual platform submit still uses `--confirm`
 - platform policy allows submission
 - submit policy passes confidence, duplicate, fake-like, cooldown, and wrong-answer checks
+
+Setup and rehearsal always block real live submission. In competition, `policy.allow_submission: true` lets high-confidence worker candidates auto-submit after the submit policy passes; `policy.allow_submission: false` keeps solving read-only.
 
 ## Secrets And Runtime State
 
@@ -129,12 +133,13 @@ Before the first public push:
 
 - Real platform variants differ; generic discovery is bounded and read-only, not a universal crawler.
 - Tunnel providers are detected but not bundled or launched by default.
-- Live submit is intentionally gated behind contest arm, explicit confirmation, platform policy, and submit policy.
+- Competition auto-submit is intentionally gated behind contest arm, profile submission policy, and submit policy. Use `contest arm --no-live-submit` or `policy.allow_submission: false` to keep solving without live submissions.
 - Postsolve writeups and archives are local-only draft material and must be reviewed before any public release.
 
 ## Documentation
 
 - [GUIDE.md](GUIDE.md): end-to-end operating guide.
+- [OPERATIONS.md](OPERATIONS.md): short event-day command guide.
 - [docs/architecture.md](docs/architecture.md): system architecture.
 - [docs/setup-windows-wsl.md](docs/setup-windows-wsl.md): WSL and worker setup.
 - [docs/platform-automation.md](docs/platform-automation.md): platform profiles and read-only sync.

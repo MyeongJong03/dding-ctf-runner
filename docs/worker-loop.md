@@ -1,12 +1,12 @@
 # Worker Solve Loop
 
-Phase 6 connects the local solve path without making live submissions by default. Phase 6.3 adds a local fake CTFd multi-worker smoke that exercises concurrent queue claims and guarded local loopback submissions.
+Phase 6 connects the local solve path. Setup and rehearsal do not make real live submissions; armed competition supervisor workers auto-submit high-confidence candidates when profile and submit-policy gates pass. Phase 6.3 adds a local fake CTFd multi-worker smoke that exercises concurrent queue claims and guarded local loopback submissions.
 
 Worker execution is guarded by run mode:
 
 - `setup`: fake/local challenges are allowed; real platform challenges are blocked before prompt construction, Codex calls, or submit planning.
 - `rehearsal`: real platform challenges are blocked unless the worker command includes `--allow-real-solve-dry-run`; live submit is still disabled.
-- `competition`: real platform challenges can run only with `--confirm-competition` and an armed contest. Live submit still needs the contest arm to enable live submit, explicit submit confirmation, platform policy, and submit policy.
+- `competition`: real platform challenges can run only with `--confirm-competition` and an armed contest. Live submit is on by default for supervised workers when the arm state allows it; it still needs profile `allow_submission: true` and submit policy approval.
 
 Pwn/rev workers should use the persistent Docker pool when it has been started for the contest. Start it before assigning pwn/rev-heavy queues so workers avoid repeated one-shot `docker run` startup cost:
 

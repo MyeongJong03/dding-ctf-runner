@@ -2,7 +2,7 @@ import time
 import unittest
 
 from ctf_runner.solve_result import parse_solver_output
-from ctf_runner.submit import classify_flag_confidence, detect_flag_candidates, hash_flag, redact_flag, should_submit
+from ctf_runner.submit import classify_flag_confidence, detect_flag_candidates, hash_flag, load_submit_policy, redact_flag, should_submit
 
 
 def flag(prefix: str = "DH", body: str = "unit_real_value") -> str:
@@ -74,6 +74,45 @@ class SubmitPolicyTests(unittest.TestCase):
         )
         self.assertTrue(decision["allowed"])
         self.assertEqual(decision["confidence"], "high")
+
+    def test_competition_default_policy_allows_only_high_confidence(self):
+        policy = load_submit_policy()
+        high = flag("tjctf", "verified_competition_value")
+        medium = flag("tjctf", "uncertain_competition_value")
+        fake = flag("tjctf", "dummy_test_value")
+
+        allowed = should_submit(high, policy, [], context={"source": "exploit_output", "run_mode": "competition"})
+        self.assertTrue(allowed["allowed"])
+        self.assertEqual(allowed["reason"], "ok")
+
+        medium_decision = should_submit(medium, policy, [], context={"run_mode": "competition"})
+        self.assertFalse(medium_decision["allowed"])
+        self.assertEqual(medium_decision["reason"], "confidence_too_low")
+
+        fake_decision = should_submit(fake, policy, [], context={"source": "exploit_output", "run_mode": "competition"})
+        self.assertFalse(fake_decision["allowed"])
+        self.assertEqual(fake_decision["reason"], "fake_likely")
+
+        duplicate = should_submit(
+            high,
+            policy,
+            [{"flag_hash": hash_flag(high), "status": "accepted"}],
+            context={"source": "exploit_output", "run_mode": "competition"},
+        )
+        self.assertFalse(duplicate["allowed"])
+        self.assertEqual(duplicate["reason"], "duplicate")
+
+        wrong_limit = should_submit(
+            flag("tjctf", "wrong_limit_competition_value"),
+            policy,
+            [
+                {"flag_hash": "x1", "status": "rejected", "submitted_at_epoch": time.time() - 100},
+                {"flag_hash": "x2", "status": "incorrect", "submitted_at_epoch": time.time() - 90},
+            ],
+            context={"source": "exploit_output", "run_mode": "competition"},
+        )
+        self.assertFalse(wrong_limit["allowed"])
+        self.assertEqual(wrong_limit["reason"], "wrong_submission_limit")
 
     def test_evidence_source_and_derivation_are_high_confidence(self):
         candidate = flag("tjctf", "file_evidence_value")

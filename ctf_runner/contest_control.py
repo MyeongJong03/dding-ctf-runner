@@ -76,7 +76,7 @@ def arm_contest(
     *,
     profile_path: str | Path,
     confirm_competition: bool,
-    allow_live_submit: bool = False,
+    allow_live_submit: bool | None = None,
     allow_instance_start: bool = False,
     max_workers: int = 5,
     max_parallel_codex: int = 2,
@@ -96,6 +96,7 @@ def arm_contest(
     root.mkdir(parents=True, exist_ok=True)
     now = utc_now()
     control = _default_control(contest_id)
+    live_submit_allowed = True if allow_live_submit is None else bool(allow_live_submit)
     control.update(
         {
             "profile_path": _display_profile_path(profile_path),
@@ -104,7 +105,7 @@ def arm_contest(
             "armed_at": now,
             "disarmed_at": None,
             "operator_confirmation": "confirm-competition",
-            "allow_live_submit": bool(allow_live_submit),
+            "allow_live_submit": live_submit_allowed,
             "allow_instance_start": bool(allow_instance_start),
             "max_workers": _coerce_positive_int(max_workers, 5),
             "max_parallel_codex": _coerce_positive_int(max_parallel_codex, 2),

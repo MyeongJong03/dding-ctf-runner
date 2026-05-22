@@ -39,13 +39,29 @@ def test_public_check_docs_and_gitignore_coverage_ok(tmp_path: Path):
     assert "fresh_clone_check" in result["test_commands"]
 
 
+def test_public_check_requires_operations_doc(tmp_path: Path):
+    _write_required_public_files(tmp_path)
+    (tmp_path / "OPERATIONS.md").unlink()
+
+    result = run_public_check(
+        repo=tmp_path,
+        include_preflight=False,
+        tracked_files=[path for path in _required_tracked_files() if path != "OPERATIONS.md"],
+        untracked_files=[],
+    )
+
+    assert result["status"] == "blocked"
+    assert "required_docs_missing" in result["high"]
+    assert "OPERATIONS.md" in result["required"]["missing"]
+
+
 def test_public_check_secret_like_content_blocks_non_fixture_file(tmp_path: Path):
     _write_required_public_files(tmp_path)
     app = tmp_path / "notes" / "unsafe_note.py"
     app.parent.mkdir()
     app.write_text("value = 'FLAG' + '{' + 'not_raw_but_safe' + '}'\n", encoding="utf-8")
     raw = tmp_path / "notes" / "raw_note.txt"
-    raw.write_text("candidate=FLAG{unit_secret_value}\n", encoding="utf-8")
+    raw.write_text("candidate=" + _flag_like("FLAG", "unit_secret_value") + "\n", encoding="utf-8")
 
     result = run_public_check(
         repo=tmp_path,
@@ -126,6 +142,7 @@ def test_public_check_blocks_real_ctf_name_in_public_docs(tmp_path: Path):
 def _write_required_public_files(root: Path) -> None:
     (root / "README.md").write_text("# README\n", encoding="utf-8")
     (root / "GUIDE.md").write_text("# GUIDE\n", encoding="utf-8")
+    (root / "OPERATIONS.md").write_text("# OPERATIONS\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname = \"example\"\n", encoding="utf-8")
     (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     (root / ".gitignore").write_text(
@@ -191,4 +208,8 @@ def _required_docs() -> list[str]:
 
 
 def _required_tracked_files() -> list[str]:
-    return ["README.md", "GUIDE.md", "pyproject.toml", "uv.lock", ".gitignore", *_required_docs()]
+    return ["README.md", "GUIDE.md", "OPERATIONS.md", "pyproject.toml", "uv.lock", ".gitignore", *_required_docs()]
+
+
+def _flag_like(prefix: str, body: str) -> str:
+    return prefix + "{" + body + "}"

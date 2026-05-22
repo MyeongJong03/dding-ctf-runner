@@ -2,6 +2,8 @@
 
 This guide describes the public-safe operating model for `dding-ctf-runner`. Commands use placeholders only; keep real contest URLs, profile paths, cookies, tokens, browser storage, attachments, queue DBs, writeups, and flags outside this repository.
 
+For the short event-day command sequence, see [OPERATIONS.md](OPERATIONS.md).
+
 ## 1. Operating Concept
 
 The runner is a shell-first CTF control plane:
@@ -168,7 +170,7 @@ Arm only when the real competition solve window is intended:
   --json
 ```
 
-Add `--allow-live-submit` only after submission policy and platform policy are ready. Disarm after the contest or any pause:
+Competition arm enables live submit by default. Add `--no-live-submit` to solve without live submissions, or keep the profile policy at `allow_submission: false`. Disarm after the contest or any pause:
 
 ```bash
 ./scripts/ctfctl contest disarm --contest-id <contest> --stop-workers --json
@@ -278,12 +280,12 @@ If history contains unrelated local runtime material or you are not sure whether
 Live submit requires:
 
 - armed contest
-- arm state with live submit enabled
-- explicit submit confirmation
+- arm state with live submit enabled; this is the competition default unless `--no-live-submit` is used
+- worker submit confirmation is added by `contest start-workers`; manual platform submit still requires `--confirm`
 - platform policy `allow_submission: true`
 - submit policy pass
 
-The submit policy checks duplicate hashes, confidence, fake-like values, cooldowns, and wrong-answer limits. Public payloads store hashes and redacted summaries only.
+Setup and rehearsal block real submit even when the profile allows submission. The submit policy checks duplicate hashes, confidence, fake-like values, cooldowns, and wrong-answer limits. Public payloads store hashes and redacted summaries only.
 
 ## 13. Postsolve And Archive
 
@@ -359,6 +361,6 @@ Before publishing or running a real contest:
 - No real auth, cookies, tokens, storage state, queue DBs, downloads, writeups, or flags are tracked.
 - Workers are launched through wrappers only.
 - Real platform sync is rehearsal/read-only unless competition is armed.
-- Live submit requires arm, confirmation, platform policy, and submit policy.
+- Competition auto-submit requires arm, profile policy, and submit policy; use `--no-live-submit` to turn it off.
 - Generated postsolve/archive material stays local-only.
 - No public git push happens during active CTF work.
