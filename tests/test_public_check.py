@@ -200,6 +200,7 @@ def _required_docs() -> list[str]:
         "docs/architecture.md",
         "docs/platform-automation.md",
         "docs/worker-loop.md",
+        "docs/interactive-operations.md",
         "docs/contest-operations.md",
         "docs/callbacks.md",
         "docs/postsolve.md",

@@ -56,6 +56,21 @@ from .docker_pool import (
 from .full_rehearsal import run_full_rehearsal
 from .handoff import read_handoffs
 from .ingest import brief_for_challenge, ingest_challenge, ingest_text_challenge, ingest_text_file, manifest_path, scan_path
+from .interactive import (
+    board_status as interactive_board_status,
+    claim_challenge as interactive_claim_challenge,
+    cleanup_challenge as interactive_cleanup_challenge,
+    init_operator as interactive_init_operator,
+    mark_external_solved as interactive_mark_external_solved,
+    mark_stalled as interactive_mark_stalled,
+    memo_update as interactive_memo_update,
+    release_claim as interactive_release_claim,
+    solver_prompt as interactive_solver_prompt,
+    submit_flag_file as interactive_submit_flag_file,
+    sync_operator as interactive_sync_operator,
+    upload_submit as interactive_upload_submit,
+    writeup_challenge as interactive_writeup_challenge,
+)
 from .multi_worker import run_local_e2e, run_parallel_smoke, worker_status
 from .platform_base import PlatformAction, action_to_dict
 from .platform_ctfd import load_platform_adapter
@@ -271,6 +286,122 @@ def _cmd_contest_full_rehearsal(args: argparse.Namespace) -> int:
     )
     _print_public_json(data, show_public_url=False)
     return 0 if data.get("status") in {"ok", "acceptable"} else 1
+
+
+def _cmd_interactive_init(args: argparse.Namespace) -> int:
+    data = interactive_init_operator(
+        args.contest_id,
+        profile=args.profile,
+        writeup_root=args.writeup_root,
+        agents=args.agents,
+    )
+    _print_json(data)
+    return 0
+
+
+def _cmd_interactive_sync(args: argparse.Namespace) -> int:
+    data = interactive_sync_operator(
+        args.contest_id,
+        profile=args.profile,
+        live=args.live,
+        download=args.download,
+        ingest=args.ingest,
+    )
+    _print_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_board(args: argparse.Namespace) -> int:
+    data = interactive_board_status(args.contest_id)
+    if args.json:
+        _print_json(data)
+    else:
+        _print_json({"status": data.get("status"), "contest_id": data.get("contest_id"), "counts": data.get("counts")})
+    return 0
+
+
+def _cmd_interactive_claim(args: argparse.Namespace) -> int:
+    data = interactive_claim_challenge(
+        args.contest_id,
+        agent=args.agent,
+        challenge=args.challenge,
+        allow_duplicate=args.allow_duplicate,
+    )
+    _print_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_release(args: argparse.Namespace) -> int:
+    _print_json(interactive_release_claim(args.contest_id, agent=args.agent, challenge=args.challenge, reason=args.reason))
+    return 0
+
+
+def _cmd_interactive_stalled(args: argparse.Namespace) -> int:
+    data = interactive_mark_stalled(args.contest_id, agent=args.agent, challenge=args.challenge, reason=args.reason)
+    _print_json(data)
+    return 0 if data.get("status") != "not_found" else 1
+
+
+def _cmd_interactive_external_solved(args: argparse.Namespace) -> int:
+    data = interactive_mark_external_solved(args.contest_id, challenge=args.challenge)
+    _print_json(data)
+    return 0 if data.get("status") != "not_found" else 1
+
+
+def _cmd_interactive_submit(args: argparse.Namespace) -> int:
+    data = interactive_submit_flag_file(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        flag_file=args.flag_file,
+        confirm=args.confirm,
+    )
+    _print_json(data)
+    return 0 if data.get("status") not in {"blocked", "rejected", "wrong", "incorrect"} else 1
+
+
+def _cmd_interactive_upload_submit(args: argparse.Namespace) -> int:
+    data = interactive_upload_submit(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        artifact=args.artifact,
+        confirm=args.confirm,
+    )
+    _print_json(data)
+    return 0
+
+
+def _cmd_interactive_writeup(args: argparse.Namespace) -> int:
+    data = interactive_writeup_challenge(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        category=args.category,
+        writeup_root=args.writeup_root,
+        languages=args.languages,
+        include_code=args.include_code,
+    )
+    _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_cleanup(args: argparse.Namespace) -> int:
+    data = interactive_cleanup_challenge(args.contest_id, challenge_id=args.challenge_id, safe=args.safe)
+    _print_json(data)
+    return 0
+
+
+def _cmd_interactive_memo(args: argparse.Namespace) -> int:
+    data = interactive_memo_update(args.contest_id, challenge_id=args.challenge_id, kind=args.kind, append=args.append)
+    _print_json(data)
+    return 0
+
+
+def _cmd_interactive_prompt(args: argparse.Namespace) -> int:
+    data = interactive_solver_prompt(args.contest_id, agent=args.agent)
+    if args.json:
+        _print_json(data)
+    else:
+        print(redact_text(str(data.get("prompt") or "")))
+    return 0
 
 
 def _cmd_contest_resources(args: argparse.Namespace) -> int:
@@ -1822,6 +1953,95 @@ def build_parser() -> argparse.ArgumentParser:
     repo_public_check.add_argument("--json", action="store_true")
     repo_public_check.add_argument("--skip-preflight", action="store_true")
     repo_public_check.set_defaults(func=_cmd_repo_public_check)
+
+    interactive = sub.add_parser("interactive")
+    interactive_sub = interactive.add_subparsers(dest="interactive_command", required=True)
+    interactive_init = interactive_sub.add_parser("init")
+    interactive_init.add_argument("--contest-id", required=True)
+    interactive_init.add_argument("--profile")
+    interactive_init.add_argument("--writeup-root")
+    interactive_init.add_argument("--agents", type=int)
+    interactive_init.add_argument("--json", action="store_true")
+    interactive_init.set_defaults(func=_cmd_interactive_init)
+    interactive_sync = interactive_sub.add_parser("sync")
+    interactive_sync.add_argument("--contest-id", required=True)
+    interactive_sync.add_argument("--profile", required=True)
+    interactive_sync.add_argument("--live", action="store_true")
+    interactive_sync.add_argument("--download", action="store_true")
+    interactive_sync.add_argument("--ingest", action="store_true")
+    interactive_sync.add_argument("--json", action="store_true")
+    interactive_sync.set_defaults(func=_cmd_interactive_sync)
+    interactive_board = interactive_sub.add_parser("board")
+    interactive_board.add_argument("--contest-id", required=True)
+    interactive_board.add_argument("--json", action="store_true")
+    interactive_board.set_defaults(func=_cmd_interactive_board)
+    interactive_claim = interactive_sub.add_parser("claim")
+    interactive_claim.add_argument("--contest-id", required=True)
+    interactive_claim.add_argument("--agent", required=True)
+    interactive_claim.add_argument("--challenge")
+    interactive_claim.add_argument("--allow-duplicate", action="store_true")
+    interactive_claim.add_argument("--json", action="store_true")
+    interactive_claim.set_defaults(func=_cmd_interactive_claim)
+    interactive_release = interactive_sub.add_parser("release")
+    interactive_release.add_argument("--contest-id", required=True)
+    interactive_release.add_argument("--agent", required=True)
+    interactive_release.add_argument("--challenge")
+    interactive_release.add_argument("--reason", required=True)
+    interactive_release.add_argument("--json", action="store_true")
+    interactive_release.set_defaults(func=_cmd_interactive_release)
+    interactive_stalled = interactive_sub.add_parser("stalled")
+    interactive_stalled.add_argument("--contest-id", required=True)
+    interactive_stalled.add_argument("--agent", required=True)
+    interactive_stalled.add_argument("--challenge", required=True)
+    interactive_stalled.add_argument("--reason", required=True)
+    interactive_stalled.add_argument("--json", action="store_true")
+    interactive_stalled.set_defaults(func=_cmd_interactive_stalled)
+    interactive_external_solved = interactive_sub.add_parser("external-solved")
+    interactive_external_solved.add_argument("--contest-id", required=True)
+    interactive_external_solved.add_argument("--challenge", required=True)
+    interactive_external_solved.add_argument("--json", action="store_true")
+    interactive_external_solved.set_defaults(func=_cmd_interactive_external_solved)
+    interactive_submit = interactive_sub.add_parser("submit")
+    interactive_submit.add_argument("--contest-id", required=True)
+    interactive_submit.add_argument("--challenge-id", required=True)
+    interactive_submit.add_argument("--flag-file", required=True)
+    interactive_submit.add_argument("--confirm", action="store_true")
+    interactive_submit.add_argument("--json", action="store_true")
+    interactive_submit.set_defaults(func=_cmd_interactive_submit)
+    interactive_upload_submit = interactive_sub.add_parser("upload-submit")
+    interactive_upload_submit.add_argument("--contest-id", required=True)
+    interactive_upload_submit.add_argument("--challenge-id", required=True)
+    interactive_upload_submit.add_argument("--artifact", required=True)
+    interactive_upload_submit.add_argument("--confirm", action="store_true")
+    interactive_upload_submit.add_argument("--json", action="store_true")
+    interactive_upload_submit.set_defaults(func=_cmd_interactive_upload_submit)
+    interactive_writeup = interactive_sub.add_parser("writeup")
+    interactive_writeup.add_argument("--contest-id", required=True)
+    interactive_writeup.add_argument("--challenge-id", required=True)
+    interactive_writeup.add_argument("--category", required=True)
+    interactive_writeup.add_argument("--writeup-root")
+    interactive_writeup.add_argument("--languages", default="ko,en")
+    interactive_writeup.add_argument("--include-code", action="store_true")
+    interactive_writeup.add_argument("--json", action="store_true")
+    interactive_writeup.set_defaults(func=_cmd_interactive_writeup)
+    interactive_cleanup = interactive_sub.add_parser("cleanup")
+    interactive_cleanup.add_argument("--contest-id", required=True)
+    interactive_cleanup.add_argument("--challenge-id", required=True)
+    interactive_cleanup.add_argument("--safe", action="store_true")
+    interactive_cleanup.add_argument("--json", action="store_true")
+    interactive_cleanup.set_defaults(func=_cmd_interactive_cleanup)
+    interactive_memo = interactive_sub.add_parser("memo")
+    interactive_memo.add_argument("--contest-id", required=True)
+    interactive_memo.add_argument("--challenge-id", required=True)
+    interactive_memo.add_argument("--kind", choices=["memory", "evidence", "attempts", "next_steps", "operator_notes"], required=True)
+    interactive_memo.add_argument("--append")
+    interactive_memo.add_argument("--json", action="store_true")
+    interactive_memo.set_defaults(func=_cmd_interactive_memo)
+    interactive_prompt = interactive_sub.add_parser("prompt")
+    interactive_prompt.add_argument("--contest-id", required=True)
+    interactive_prompt.add_argument("--agent", required=True)
+    interactive_prompt.add_argument("--json", action="store_true")
+    interactive_prompt.set_defaults(func=_cmd_interactive_prompt)
 
     contest = sub.add_parser("contest")
     contest_sub = contest.add_subparsers(dest="contest_command", required=True)

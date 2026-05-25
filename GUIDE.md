@@ -9,10 +9,11 @@ For the short event-day command sequence, see [OPERATIONS.md](OPERATIONS.md).
 The runner is a shell-first CTF control plane:
 
 - `ctfctl` is the primary operator interface.
-- SQLite queue state tracks challenges, claims, submissions, and worker status.
-- Codex workers run through `scripts/ctf-worker-*` wrappers with isolated worker homes.
+- The default live model is an interactive Codex swarm: users `cd ~/CTF`, start several Codex terminals, and paste an autonomous solver prompt.
+- Local operator files track board state, claims, submissions, stalled work, and accepted solves.
 - Platform automation is policy-gated and defaults to read-only setup/rehearsal behavior.
 - Solves, submissions, and postsolve artifacts are separated from public repo files.
+- Background worker queue/supervisor automation is legacy/advanced and not the default event-day path.
 
 ## 2. Setup, Rehearsal, Competition
 
@@ -82,32 +83,49 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 pwn/rev-heavy work remains better suited to the primary Windows WSL runner unless
 Mac Docker timing is validated for that event. See [docs/setup-macos.md](docs/setup-macos.md).
 
-## 5. Codex Worker Setup
+## 5. Interactive Codex Swarm
 
-Initialize worker homes:
+Initialize the operator board and sync challenge metadata:
+
+```bash
+export CONTEST_ID=<contest>
+export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
+
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+```
+
+Generate one prompt per agent:
+
+```bash
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-2
+```
+
+Open multiple terminals and run interactive Codex from the CTF workspace:
+
+```bash
+cd ~/CTF
+codex
+```
+
+Paste a generated prompt into each Codex terminal. Windows operators can use six terminals when resources allow. Mac operators should start with four. Each agent claims one challenge at a time, keeps `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`, submits only through guarded `ctfctl interactive submit`, writes accepted-only Korean and English writeups, cleans safe temp files, and claims the next problem.
+
+Use `--allow-duplicate` only when the operator intentionally wants multiple local Codex sessions on the same challenge. Cross-machine duplicate claims are not coordinated.
+
+## 6. Legacy Codex Worker Setup
+
+The old worker wrappers and supervisor remain for advanced rehearsals and compatibility tests:
 
 ```bash
 ./scripts/init-codex-workers.sh --count 5 --link-auth
+./scripts/ctf-worker-1 --dry-run
 ```
 
-Start workers only through wrappers:
+Do not use background workers as the default live contest flow.
 
-```bash
-./scripts/ctf-worker-1
-./scripts/ctf-worker-2
-```
-
-Wrapper defaults:
-
-- model: `auto/unpinned`
-- approval: `never`
-- sandbox: `danger-full-access`
-- worker home: `~/.codex-workers/<worker-id>`
-- prompt mode: no-prompt automation through the runner wrapper
-
-Do not use plain `codex` for competition workers. It can load unrelated global instructions and bypass runner-specific worker setup.
-
-## 6. Preflight
+## 7. Preflight
 
 Run preflight before rehearsal and before competition:
 
@@ -121,7 +139,7 @@ Expected public-readiness state:
 - `tunnel_provider_missing` can be Medium when no public tunnel provider is installed.
 - `global_long_agents` can be Medium when global instructions are long, as long as worker wrappers are used.
 
-## 7. Platform Profile
+## 8. Platform Profile
 
 Store platform profiles outside the repo:
 
@@ -159,7 +177,7 @@ Check profiles without printing raw auth:
 ./scripts/ctfctl auth storage-check --path ~/.ctf-solver/secrets/<contest>.storage_state.json --json
 ```
 
-## 8. Rehearsal Read-Only Sync
+## 9. Rehearsal Read-Only Sync
 
 Read-only sync can prepare local briefs without arming the contest:
 
@@ -175,7 +193,7 @@ Read-only sync can prepare local briefs without arming the contest:
 
 This should not solve challenges, submit flags, start instances, automate browser login, or expose tunnels.
 
-## 9. Contest Arm And Disarm
+## 10. Contest Arm And Disarm
 
 Prestart checks are local by default:
 
@@ -204,7 +222,7 @@ Competition arm enables live submit by default. Add `--no-live-submit` to solve 
 ./scripts/ctfctl contest disarm --contest-id <contest> --stop-workers --json
 ```
 
-## 10. Worker Execution
+## 11. Legacy Worker Execution
 
 Supervisor dry run and apply:
 
@@ -252,7 +270,7 @@ Local fake E2E:
 
 The Docker commands exercise the persistent pool and then stop it. The callback smoke starts a loopback dummy listener, exposes only that listener through the selected provider, sends a safe probe, and cleans up listener/tunnel resources.
 
-## 11. Before First Real Contest
+## 12. Before First Real Contest
 
 Run the final full fake competition rehearsal before using the automation on a real event:
 
@@ -276,7 +294,7 @@ Proceed only after the mock full rehearsal reports `status: ok`, the Codex mini 
 
 Do not prepare a GitHub/public release until the full rehearsal and `scripts/release-check.sh` pass.
 
-## 12. Release And Public Checks
+## 13. Release And Public Checks
 
 Run the release gate before publishing:
 
@@ -303,7 +321,7 @@ git log --stat
 
 If history contains unrelated local runtime material or you are not sure whether old commits are public-safe, create a clean public branch or a fresh repository with a squashed initial commit. Push only source, docs, scripts, tests, and public fixtures.
 
-## 13. Auto-Submit Policy
+## 14. Auto-Submit Policy
 
 Live submit requires:
 
@@ -315,7 +333,7 @@ Live submit requires:
 
 Setup and rehearsal block real submit even when the profile allows submission. The submit policy checks duplicate hashes, confidence, fake-like values, cooldowns, and wrong-answer limits. Public payloads store hashes and redacted summaries only.
 
-## 14. Postsolve And Archive
+## 15. Postsolve And Archive
 
 For solved challenges:
 
@@ -333,11 +351,11 @@ Generated files live under:
 
 They are local-only and ignored. Raw flags are replaced by hashes or redaction placeholders.
 
-## 15. Skill Candidate Review
+## 16. Skill Candidate Review
 
 `skill_candidate.md` is a candidate only. After the contest, review it manually and promote only sanitized reusable patterns. The runner does not modify existing personal skill repositories.
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 Plain Codex loads unrelated global instructions:
 
@@ -377,7 +395,7 @@ Legacy MCP warnings:
 ./scripts/fix-codex-mcp.sh --remove-legacy-dreamhack
 ```
 
-## 17. Safety Checklist
+## 18. Safety Checklist
 
 Before publishing or running a real contest:
 

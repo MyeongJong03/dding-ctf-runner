@@ -66,6 +66,7 @@ REQUIRED_DOCS = (
     "docs/architecture.md",
     "docs/platform-automation.md",
     "docs/worker-loop.md",
+    "docs/interactive-operations.md",
     "docs/contest-operations.md",
     "docs/callbacks.md",
     "docs/postsolve.md",
@@ -165,7 +166,7 @@ def run_public_check(
     tracked_sensitive = _sensitive_paths(tracked)
     untracked_sensitive = _sensitive_paths(untracked)
     tracked_runtime = [path for path in tracked if _runtime_path(path)]
-    untracked_runtime = [path for path in untracked if _runtime_path(path)]
+    untracked_runtime = [path for path in untracked if _runtime_path(path) and not _operator_runtime_path(path)]
     existing_runtime = _existing_runtime_paths(root)
     ignored_runtime = _ignored_runtime_status(root, existing_runtime)
     repo_local_forbidden = _existing_forbidden_paths(root)
@@ -301,6 +302,11 @@ def _sensitive_path(path: str) -> bool:
 def _runtime_path(path: str) -> bool:
     first = path.replace("\\", "/").split("/", 1)[0]
     return first in RUNTIME_PATHS
+
+
+def _operator_runtime_path(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    return len(parts) >= 4 and parts[0] == "contests" and parts[2] == "operator"
 
 
 def _existing_runtime_paths(root: Path) -> list[str]:

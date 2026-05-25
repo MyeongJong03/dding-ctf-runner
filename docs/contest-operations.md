@@ -1,6 +1,14 @@
 # Contest Operations
 
-This is the operator path for moving from setup/rehearsal into a real competition solve window without accidental solve or submit, then producing local-only postsolve notes after accepted solves.
+This page documents legacy/advanced contest controls. The default live operation path is now the interactive Codex swarm in [interactive-operations.md](interactive-operations.md). Use `contest start-workers` only for rehearsals, compatibility tests, or an explicit operator decision to run background automation.
+
+For the default live path:
+
+```bash
+./scripts/ctfctl interactive init --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --live --download --ingest --json
+./scripts/ctfctl interactive prompt --contest-id <contest> --agent agent-1
+```
 
 ## Default Safety
 

@@ -2,15 +2,33 @@
 
 ## 1. 기본 실행 방식
 
-- Plain `codex` 금지.
-- Operator는 `ctf-worker-1`로 실행.
+- 기본은 interactive Codex swarm이다.
+- 사용자는 `cd ~/CTF` 후 여러 Codex 터미널을 직접 실행한다.
+- 각 Codex는 autonomous solver로 claim/solve/submit/writeup/cleanup/next 루프를 계속 돈다.
+- Controller와 solver를 나누지 않는다.
 - 실제 작업 repo는 `~/dding-ctf-runner`.
-- MacBook에서는 기존 `~/CTF`/global Codex 세팅을 유지하고 runner wrapper만 사용.
+- Background worker/supervisor/start-workers는 legacy/advanced로만 사용한다.
 
 ```bash
 cd ~/dding-ctf-runner
-ctf-worker-1
+export CONTEST_ID=<contest>
+export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
+
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
 ```
+
+각 Codex 터미널:
+
+```bash
+cd ~/CTF
+codex
+```
+
+붙여넣을 prompt는 `interactive prompt` 출력에서 가져온다. Windows는 6 terminals,
+Mac은 4 terminals를 기본값으로 운영한다.
 
 MacBook secondary/mobile runner에서는 Docker workspace를 `~/CTF` 밖으로 둔다.
 Apple Silicon에서 `ctf-pwn:latest` linux/amd64 이미지는 emulation으로 동작하므로
@@ -60,34 +78,15 @@ policy:
 
 `allow_submission: false`이면 solve는 가능하지만 실제 제출은 막힌다. Setup/rehearsal에서는 `allow_submission: true`여도 제출은 막힌다.
 
-## 3. Operator Prompt
+## 3. Solver Prompt
 
-대회 시작 때 operator Codex에 붙여넣기:
+대회 시작 때 각 Codex에 붙여넣기:
 
-```text
-Operate ~/dding-ctf-runner for this CTF. Do not use plain codex, do not print secrets or raw flags, and do not push git changes.
-
-Set:
-CONTEST_ID=<contest>
-PROFILE=~/.ctf-solver/platforms/<contest>.yaml
-
-Run:
-cd ~/dding-ctf-runner
-./scripts/ctfctl preflight --deep --json
-./scripts/ctfctl platform profile-check --config "$PROFILE" --json
-./scripts/ctfctl platform sync-challenges --mode rehearsal --config "$PROFILE" --live --save-state --ingest-text --json
-./scripts/ctfctl contest prestart --contest-id "$CONTEST_ID" --profile "$PROFILE" --json
-./scripts/ctfctl contest arm --contest-id "$CONTEST_ID" --profile "$PROFILE" --confirm-competition --max-workers 5 --max-parallel-codex 2 --json
-./scripts/ctfctl docker pool-start --contest-id "$CONTEST_ID" --workers 5 --image ctf-pwn:latest --json
-./scripts/ctfctl contest start-workers --contest-id "$CONTEST_ID" --dry-run --json
-./scripts/ctfctl contest start-workers --contest-id "$CONTEST_ID" --apply --workers 5 --solver codex --allow-codex-call --max-parallel-codex 2 --no-stop-when-empty --postsolve --json
-./scripts/ctfctl contest status --contest-id "$CONTEST_ID" --json
-
-Auto-submit is on by default only in armed competition mode, and only when the profile has policy.allow_submission=true. If confidence or submit guards block a candidate, inspect the blocked reason without printing the raw candidate.
-
-At shutdown:
-./scripts/ctfctl contest disarm --contest-id "$CONTEST_ID" --stop-workers --cleanup-resources --stop-docker-pool --json
+```bash
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
 ```
+
+Prompt 정책에는 다음이 포함된다: 한 문제만 풀고 멈추지 않기, solved/stalled/contest ended/user stop 외에는 계속 진행하기, 장황한 중간 보고 금지, accepted solve만 writeup 작성, 한국어/영어 writeup 작성, self memo 지속, 같은 컴퓨터 내 중복 claim 기본 방지, raw secret/flag 출력 금지.
 
 ## 4. 자동 제출 정책
 
@@ -107,27 +106,22 @@ export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 
 ./scripts/ctfctl preflight --deep --json
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
-./scripts/ctfctl platform sync-challenges --mode rehearsal --config "$PROFILE" --live --save-state --ingest-text --json
-./scripts/ctfctl contest prestart --contest-id "$CONTEST_ID" --profile "$PROFILE" --json
-./scripts/ctfctl contest arm --contest-id "$CONTEST_ID" --profile "$PROFILE" --confirm-competition --max-workers 5 --max-parallel-codex 2 --json
-./scripts/ctfctl docker pool-start --contest-id "$CONTEST_ID" --workers 5 --image ctf-pwn:latest --json
-./scripts/ctfctl contest start-workers --contest-id "$CONTEST_ID" --dry-run --json
-./scripts/ctfctl contest start-workers --contest-id "$CONTEST_ID" --apply --workers 5 --solver codex --allow-codex-call --max-parallel-codex 2 --no-stop-when-empty --postsolve --json
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
 ```
 
 ## 6. 모니터링
 
 ```bash
-./scripts/ctfctl contest status --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl contest worker-status --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl contest worker-logs --contest-id "$CONTEST_ID" --worker-id worker-1 --tail 80 --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
 ## 7. 종료/정리
 
 ```bash
-./scripts/ctfctl contest disarm --contest-id "$CONTEST_ID" --stop-workers --cleanup-resources --stop-docker-pool --json
-./scripts/ctfctl contest status --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
 ## 8. 문제 발생 시
@@ -135,18 +129,21 @@ export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 - Docker 안 켜짐: `./scripts/ctfctl preflight --deep --json`, Docker Desktop WSL integration 확인.
 - `cloudflared` 없음: public callback이 필요한 문제에서만 설치. 필요 없으면 Medium으로 둔다.
 - `storage_state` 만료: 새 storage 파일을 repo 밖 `~/.ctf-solver/secrets`에 저장하고 `auth storage-check` 실행.
-- Worker 안 돎: `contest worker-status`, `contest worker-logs`, `contest restart-worker` 확인.
-- `global_long_agents`: `ctf-worker-*` wrapper만 사용.
+- Claim 중복: 기본 lock은 같은 컴퓨터 내 중복을 막는다. 의도한 중복 풀이만 `--allow-duplicate`.
+- Context drift: `interactive memo`로 `memory/evidence/attempts/next_steps/operator_notes` 갱신.
 - Submit blocked: `submit_plan_status`, `live_submit_mode_decision.reason`, profile `policy.allow_submission`, `config/submit_policy.yaml` guard 확인.
 
 ## 9. 대회 후
 
 ```bash
-./scripts/ctfctl postsolve batch --contest-id "$CONTEST_ID" --status solved --json
-./scripts/ctfctl postsolve skill-candidates --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl contest disarm --contest-id "$CONTEST_ID" --stop-workers --cleanup-resources --stop-docker-pool --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
-- Postsolve와 writeup draft는 local-only로 review.
+- Accepted solve만 `interactive writeup --languages ko,en --include-code`로 한국어/영어 두 파일 작성.
+- Solver/exploit 코드가 있으면 writeup에 전체 코드 포함.
 - `skill_candidate`는 수동 review 후 sanitized pattern만 승격.
 - Contest 종료 및 rules 허용 전 public push 금지.
+
+## 10. Legacy background workers
+
+`worker_loop`, `worker_supervisor`, `multi_worker`, `contest start-workers`는 legacy/advanced flow다. 삭제하지 않지만 기본 운영 순서에서는 사용하지 않는다.

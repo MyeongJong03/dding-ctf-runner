@@ -11,9 +11,10 @@ Do not rewrite existing global CTF settings during Mac setup:
 
 - Keep `~/CTF`, `~/CTF/AGENTS.md`, `~/CTF/CLAUDE.md`, `~/.codex/AGENTS.md`,
   `~/.agents`, and `~/ctf-solver` unchanged.
-- Leave plain `codex` for the existing CTF workspace.
-- Run this project only through `scripts/ctf-worker-*` wrappers and worker-local
-  `CODEX_HOME` directories.
+- Leave plain `codex` for the existing `~/CTF` workspace. The default live
+  workflow intentionally uses visible plain Codex sessions from `~/CTF`.
+- Use `scripts/ctf-worker-*` wrappers only for legacy worker/supervisor
+  rehearsals, not for the default interactive swarm.
 - Keep real platform profiles, cookies, browser storage, downloads, callback
   hits, queue databases, postsolve output, and writeups outside the repository.
 
@@ -44,9 +45,28 @@ If Python 3.14 or a future Python release breaks Playwright wheels, create a
 Python 3.12 virtual environment with `uv` or another local Python manager. Do
 not replace the system Python.
 
-## Worker Isolation
+## Interactive Swarm
 
-Create worker homes under `~/.codex-workers`:
+Initialize the operator board from the runner repo, then start visible Codex
+terminals from `~/CTF`:
+
+```bash
+cd ~/dding-ctf-runner
+./scripts/ctfctl interactive init --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --live --download --ingest --json
+./scripts/ctfctl interactive prompt --contest-id <contest> --agent agent-1
+
+cd ~/CTF
+codex
+```
+
+Four Codex terminals is the recommended Mac default. Each terminal should use a
+different generated agent prompt and should continue through claim, solve,
+submit, writeup, cleanup, and next claim until stopped.
+
+## Legacy Worker Isolation
+
+Create worker homes only when running legacy worker rehearsals:
 
 ```bash
 ./scripts/init-codex-workers.sh --count 5 --link-auth
@@ -54,7 +74,7 @@ Create worker homes under `~/.codex-workers`:
 ./scripts/ctf-worker worker-1 exec "Reply with exactly: MAC_WORKER_OK"
 ```
 
-Expected state:
+Expected legacy state:
 
 - `~/.codex-workers/worker-N/AGENTS.md` exists and is slim.
 - `~/.codex-workers/worker-N/config.toml` exists and does not copy global MCP
@@ -129,4 +149,4 @@ Acceptable Mac warnings:
   worker configs do not inherit it.
 - linux/amd64 Docker image warnings on an arm64 host.
 
-High-risk preflight findings should be fixed before running real workers.
+High-risk preflight findings should be fixed before running real interactive solvers.

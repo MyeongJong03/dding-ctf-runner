@@ -1,18 +1,17 @@
 # dding CTF Runner
 
-`dding-ctf-runner` is a shell-first control plane for running CTF competition workflows with isolated Codex workers. It is built around `ctfctl`, local queue state, explicit run modes, and policy gates so setup and rehearsal work cannot accidentally become live solving or live submission.
+`dding-ctf-runner` is a shell-first control plane for running CTF competition workflows with visible interactive Codex solver swarms. It is built around `ctfctl`, local operator files, explicit platform/submit guards, and local-only runtime state.
 
 This repository is intended to be public-safe. Real secrets, browser state, downloaded challenge material, generated writeups, state databases, and raw flags must stay outside git.
 
 ## Features
 
 - Preflight checks for WSL paths, Docker, browser readiness, worker isolation, Codex binary state, and tunnel tooling.
-- Codex worker isolation through `scripts/ctf-worker-*` wrappers and per-worker `CODEX_HOME`.
+- Interactive Codex swarm coordination through `ctfctl interactive`.
 - Local ingest and `brief.md` generation for attachment and text-only challenge material.
 - CTFd and generic read-only platform discovery with explicit `--live` and policy gates.
 - Submit planning with confidence, duplicate-hash, fake-like, cooldown, and wrong-answer guards.
-- Worker solve loop and process supervisor for fake/local E2E and guarded competition mode.
-- Contest arm/disarm control plane for switching from rehearsal into competition.
+- Legacy worker solve loop and process supervisor for fake/local E2E and advanced automation tests.
 - Final fake competition full rehearsal covering preflight, fake discovery/ingest, arm, Docker pool, callback public-smoke, workers, postsolve, cleanup, and release-check. The current release target passes the mock full rehearsal and the Codex mini rehearsal with 3/3 local easy challenges accepted.
 - Local-only postsolve summaries, writeup drafts, skill candidates, and artifact archives.
 - Public release checks through `scripts/release-check.sh`, `scripts/fresh-clone-check.sh`, `scripts/history-scan.sh`, and `ctfctl repo public-check --json`.
@@ -44,15 +43,24 @@ python3 -m venv .venv
 python3 -m pip install -e . pytest
 
 ./scripts/ctfctl preflight --deep --json
-./scripts/init-codex-workers.sh --count 5 --link-auth
 ./scripts/ctfctl fake-ctfd smoke --json
-./scripts/ctfctl worker local-e2e --workers 3 --solver mock --fake-ctfd --json
-./scripts/ctfctl contest supervisor-smoke --workers 3 --solver mock --fake-ctfd --json
-./scripts/ctfctl contest full-rehearsal --contest-id final-fake --workers 5 --solver mock --json
-./scripts/ctfctl contest full-rehearsal --contest-id final-fake-codex --workers 3 --max-parallel-codex 2 --solver codex --allow-codex-call --json
 ```
 
-Use only the `scripts/ctf-worker-*` wrappers for competition workers. Plain `codex` can load unrelated global instructions and is not the runner control surface.
+Interactive event-day setup:
+
+```bash
+export CONTEST_ID=<contest>
+export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
+
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
+```
+
+Then open multiple terminals, `cd ~/CTF`, run interactive `codex`, paste one generated prompt per agent, and let each session loop through claim, solve, verify, submit, writeup, cleanup, and next claim. Same-machine duplicate claims are blocked by default; use `ctfctl interactive claim --allow-duplicate` only when duplicate solving is intentional.
+
+The legacy background worker/supervisor flow remains under advanced operations for rehearsals and compatibility tests. It is no longer the default quickstart.
 
 For real event day commands, use [OPERATIONS.md](OPERATIONS.md).
 
@@ -62,7 +70,7 @@ For real event day commands, use [OPERATIONS.md](OPERATIONS.md).
 - `rehearsal`: read-only real platform sync can be run intentionally. Real solving is blocked unless a dry-run solve override is explicit; live submit remains blocked.
 - `competition`: real solve workers require `--confirm-competition` and an armed contest.
 
-`ctfctl contest start-workers` is dry-run by default. Passing `--apply` launches supervised workers and writes PID/status/log files under `~/.ctf-solver/runner-state/contests/<contest>/workers/`.
+`ctfctl contest start-workers` is legacy/advanced. It remains dry-run by default. Passing `--apply` launches supervised workers and writes PID/status/log files under `~/.ctf-solver/runner-state/contests/<contest>/workers/`.
 
 Live submit requires every gate:
 
@@ -141,7 +149,7 @@ Before the first public push:
 - Real platform variants differ; generic discovery is bounded and read-only, not a universal crawler.
 - Tunnel providers are detected but not bundled or launched by default.
 - Competition auto-submit is intentionally gated behind contest arm, profile submission policy, and submit policy. Use `contest arm --no-live-submit` or `policy.allow_submission: false` to keep solving without live submissions.
-- Postsolve writeups and archives are local-only draft material and must be reviewed before any public release.
+- Interactive writeups are accepted-only and must be generated in Korean and English. If solver/exploit code exists, include the full code in the local writeup. All writeups remain local-only until reviewed.
 
 ## Documentation
 
@@ -151,6 +159,7 @@ Before the first public push:
 - [docs/setup-windows-wsl.md](docs/setup-windows-wsl.md): WSL and worker setup.
 - [docs/setup-macos.md](docs/setup-macos.md): macOS secondary runner setup.
 - [docs/platform-automation.md](docs/platform-automation.md): platform profiles and read-only sync.
+- [docs/interactive-operations.md](docs/interactive-operations.md): default interactive Codex swarm workflow.
 - [docs/contest-operations.md](docs/contest-operations.md): arm/disarm and worker commands.
 - [docs/postsolve.md](docs/postsolve.md): local-only postsolve and archive policy.
 - [docs/threat-model.md](docs/threat-model.md): risks and mitigations.

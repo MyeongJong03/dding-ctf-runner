@@ -2,6 +2,12 @@
 
 Postsolve output is local-only competition material. It is designed for operator review after a challenge is accepted, not for public publishing during an active event.
 
+The interactive workflow has a stricter writeup rule: `ctfctl interactive writeup`
+refuses unsolved challenges and writes two accepted-only files,
+`[category]ChallengeNameWriteup.ko.md` and
+`[category]ChallengeNameWriteup.en.md`. When solver/exploit code exists, the
+complete code must be included in fenced markdown blocks.
+
 ## Generated Files
 
 Default location:
