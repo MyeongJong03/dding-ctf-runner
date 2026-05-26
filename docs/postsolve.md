@@ -1,14 +1,41 @@
-# Postsolve Workflow
+# Postsolve And Writeup Policy
 
-Postsolve output is local-only competition material. It is designed for operator review after a challenge is accepted, not for public publishing during an active event.
+Postsolve output is local-only competition material. It exists for operator
+review after an accepted solve, not for public publishing during an active event.
 
-The interactive workflow has a stricter writeup rule: `ctfctl interactive writeup`
-refuses unsolved challenges and writes two accepted-only files,
-`[category]ChallengeNameWriteup.ko.md` and
-`[category]ChallengeNameWriteup.en.md`. When solver/exploit code exists, the
-complete code must be included in fenced markdown blocks.
+## Interactive Writeups
 
-## Generated Files
+The interactive workflow writes public-style challenge writeups only after an
+accepted solve is confirmed:
+
+```bash
+ctfctl interactive writeup --contest-id <contest> --challenge-id <id> --category <category> --languages ko,en --include-code --json
+```
+
+Accepted challenges produce two files:
+
+```text
+[category]ChallengeNameWriteup.ko.md
+[category]ChallengeNameWriteup.en.md
+```
+
+If solver or exploit code exists, include the complete code in fenced markdown
+blocks. This includes helper scripts and final exploit code needed to reproduce
+the solve.
+
+Do not generate writeups for unsolved, skipped, or stalled challenges. For
+unsolved work, keep only compact local records:
+
+```text
+memory.md
+evidence.md
+attempts.md
+next_steps.md
+operator_notes.md
+stalled.jsonl
+```
+
+## Generated Postsolve Files
 
 Default location:
 
@@ -18,51 +45,36 @@ Default location:
 
 Files:
 
-- `solve_summary.md`: compact solved-state record with challenge metadata, worker ID, source summary, files used, submit status, and flag hash.
-- `writeup_draft.md`: private draft with problem summary, approach, core idea, command summary, script references, and verification notes.
-- `skill_candidate.md`: candidate pattern for later manual review before updating personal skills.
-- `artifacts_manifest.json`: paths, sizes, hashes, and archive metadata for local artifacts.
+- `solve_summary.md`: compact accepted-solve record with metadata, source summary, submit status, and flag hash.
+- `writeup_draft.md`: private draft for later review.
+- `skill_candidate.md`: local candidate for a reusable pattern.
+- `artifacts_manifest.json`: paths, sizes, hashes, and archive metadata.
 - `timeline.jsonl`: redacted postsolve events.
-- `postsolve_summary.json`: machine-readable status and generated file paths.
+- `postsolve_summary.json`: machine-readable status and generated paths.
 
-Existing files are preserved with `.bak.<timestamp>` names before a new canonical file is written.
+Existing files are preserved with `.bak.<timestamp>` names before a new
+canonical file is written.
 
-## Redaction Policy
+## Redaction
 
-Raw flags, cookies, tokens, auth headers, storage state, API keys, passwords, private keys, and browser storage values must not be written to postsolve files or printed by postsolve CLI commands.
+Raw flags, cookies, tokens, auth headers, storage state, API keys, passwords,
+private keys, browser storage values, callback secrets, and shell history must
+not be written to postsolve files or printed by postsolve commands.
 
-Flags are represented as:
+Flags are represented as SHA-256 hashes or `[REDACTED_FLAG]` placeholders.
 
-- SHA-256 hash when available.
-- `[REDACTED_FLAG]` placeholder in prose.
-- Redacted text if a solver summary or local note accidentally includes a flag-like value.
+## Archive
 
-## Archive Policy
-
-`ctfctl postsolve archive` copies safe local artifacts into `postsolve/archive/` by default. It never deletes raw attachments or extracted files.
+`ctfctl postsolve archive` copies safe local artifacts into
+`postsolve/archive/` by default. It does not delete raw attachments or extracted
+files.
 
 Archive copy mode:
 
-- Skips oversized files above the default 100MB limit unless future explicit large-file support is enabled.
-- Excludes sensitive filenames such as auth, cookie, token, password, session, private key, and storage-state files.
-- Treats obvious secret-like or flag-like file contents as metadata-only, so those files appear in manifests but are not copied.
-- Skips the `postsolve/` tree itself to avoid archiving generated drafts.
-
-Cleanup is intentionally separate from archive generation and is not enabled by default.
-
-## Skill Candidate Format
-
-`skill_candidate.md` uses this structure:
-
-- pattern title
-- category
-- trigger signs
-- solution sketch
-- reusable snippet
-- avoid/false positives
-- source challenge id
-
-The file is a candidate only. It does not modify `~/ctf-solver` or any installed skill files.
+- skips oversized files above the default limit
+- excludes sensitive filenames such as auth, cookie, token, password, session, private key, and storage-state files
+- treats obvious secret-like or flag-like contents as metadata-only
+- skips the `postsolve/` tree itself
 
 ## Commands
 
@@ -74,10 +86,14 @@ The file is a candidate only. It does not modify `~/ctf-solver` or any installed
 ./scripts/ctfctl postsolve batch --contest-id <contest> --status solved --json
 ```
 
-## Post-Contest Review
+## Review Boundary
 
-After disarming the contest, review generated drafts locally. Convert `writeup_draft.md` into any required organizer format only after removing challenge-specific secrets and confirming event publication rules. Review `skill_candidate.md` files manually and promote only sanitized reusable patterns after the contest.
+After the contest, review drafts locally and remove challenge-specific secrets
+before any external publication. Review `skill_candidate.md` manually and
+promote only sanitized reusable patterns. The runner does not modify
+`~/ctf-solver` or installed skills.
 
-## Public Release Boundary
-
-Postsolve directories, archives, timelines, local solve summaries, and generated drafts are runtime outputs. They must remain outside this repository and are rejected by public-check when placed under repo-local runtime paths such as `writeups/`, `downloads/`, `contests/`, or `state/`. Public docs should describe the workflow only; do not copy generated challenge names, solver transcripts, raw candidates, callback details, or archive manifests into git.
+Postsolve directories, archives, timelines, writeups, and local solve summaries
+must remain outside this repository. Public docs describe the workflow only; do
+not copy generated challenge names, transcripts, candidates, callback details,
+or archive manifests into git.

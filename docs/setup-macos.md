@@ -1,107 +1,66 @@
 # macOS Setup
 
-This guide is for adding `dding-ctf-runner` to a Mac that already has a separate
-CTF/Codex setup. The Mac profile is intended as a secondary/mobile runner. Keep
-pwn/rev-heavy work on the primary Windows WSL runner unless local Docker timing
-is known to be acceptable.
+macOS is a secondary/mobile runner for the interactive swarm. Keep pwn/rev-heavy
+work on the primary Windows WSL runner unless local Docker timing is known to be
+acceptable.
 
 ## Boundaries
 
-Do not rewrite existing global CTF settings during Mac setup:
-
-- Keep `~/CTF`, `~/CTF/AGENTS.md`, `~/CTF/CLAUDE.md`, `~/.codex/AGENTS.md`,
-  `~/.agents`, and `~/ctf-solver` unchanged.
-- Leave plain `codex` for the existing `~/CTF` workspace. The default live
-  workflow intentionally uses visible plain Codex sessions from `~/CTF`.
-- Use `scripts/ctf-worker-*` wrappers only for legacy worker/supervisor
-  rehearsals, not for the default interactive swarm.
-- Keep real platform profiles, cookies, browser storage, downloads, callback
-  hits, queue databases, postsolve output, and writeups outside the repository.
+- Keep existing `~/CTF`, `~/CTF/AGENTS.md`, `~/CTF/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.agents`, and `~/ctf-solver` unchanged.
+- Default live solving uses visible plain Codex sessions from `~/CTF`.
+- Repo development Codex sessions belong in `~/dding-ctf-runner`; CTF solving Codex sessions belong in `~/CTF`.
+- Use `scripts/ctf-worker-*` only for legacy worker/supervisor rehearsals.
+- Keep platform profiles, cookies, browser storage, downloads, callback hits, operator state, postsolve output, and writeups outside the repo.
 
 ## Install
 
-Use the public repo checkout as the runner workspace:
-
 ```bash
 cd ~
-git clone git@github.com:MyeongJong03/dding-ctf-runner.git dding-ctf-runner
+git clone <repo-url> dding-ctf-runner
 cd ~/dding-ctf-runner
+python3 -m pip install -e . pytest
 ```
 
-If `~/dding-ctf-runner` already exists, inspect it first. Move only an empty
-placeholder checkout out of the way. Do not overwrite a non-empty directory.
-
-## Python And Browser
-
-macOS can use Homebrew Python, but browser tooling should stay repo-local:
+Browser tooling is optional:
 
 ```bash
-python3 --version
 ./scripts/setup-browser.sh
 ./scripts/ctfctl browser smoke --json
 ```
 
-If Python 3.14 or a future Python release breaks Playwright wheels, create a
-Python 3.12 virtual environment with `uv` or another local Python manager. Do
-not replace the system Python.
-
 ## Interactive Swarm
 
-Initialize the operator board from the runner repo, then start visible Codex
-terminals from `~/CTF`:
+Prepare from the runner repo:
 
 ```bash
 cd ~/dding-ctf-runner
-./scripts/ctfctl interactive init --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --agents 4 --json
-./scripts/ctfctl interactive sync --contest-id <contest> --profile ~/.ctf-solver/platforms/<contest>.yaml --live --download --ingest --json
-./scripts/ctfctl interactive prompt --contest-id <contest> --agent agent-1
+export CONTEST_ID=<contest>
+export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
+```
+
+Start up to four solver terminals:
+
+```bash
 cd ~/CTF
 codex
 ```
 
-Four Codex terminals is the recommended Mac default. Each terminal should use a
-different generated agent prompt and should continue through claim, solve,
-submit, writeup, cleanup, and next claim until stopped.
+Paste a different generated prompt into each terminal. Each terminal claims,
+solves, submits through `ctfctl`, writes accepted-only ko/en writeups, cleans up,
+and claims the next challenge.
 
-## Legacy Worker Isolation
+## Docker On Apple Silicon
 
-Create worker homes only when running legacy worker rehearsals:
+Docker Desktop on Apple Silicon can run the `ctf-pwn:latest` linux/amd64 image
+through emulation. Treat this as acceptable for smoke checks and light work, not
+as the preferred runtime for heavy pwn/rev debugging.
 
-```bash
-./scripts/init-codex-workers.sh --count 5 --link-auth
-./scripts/ctf-worker-1 --dry-run
-./scripts/ctf-worker worker-1 exec "Reply with exactly: MAC_WORKER_OK"
-```
-
-Expected legacy state:
-
-- `~/.codex-workers/worker-N/AGENTS.md` exists and is slim.
-- `~/.codex-workers/worker-N/config.toml` exists and does not copy global MCP
-  entries.
-- `~/.codex-workers/worker-N/auth.json` is a local symlink only when
-  `--link-auth` is intentionally used.
-
-Do not edit `~/.zshrc` automatically. If shortcuts are useful, add them manually:
-
-```bash
-alias ctf-runner='cd ~/dding-ctf-runner'
-alias ctf-worker-1='~/dding-ctf-runner/scripts/ctf-worker-1'
-alias ctf-worker-2='~/dding-ctf-runner/scripts/ctf-worker-2'
-alias ctf-worker-3='~/dding-ctf-runner/scripts/ctf-worker-3'
-alias ctf-worker-4='~/dding-ctf-runner/scripts/ctf-worker-4'
-alias ctf-worker-5='~/dding-ctf-runner/scripts/ctf-worker-5'
-```
-
-## Docker
-
-Docker Desktop on Apple Silicon can run the `ctf-pwn:latest` linux/amd64 image,
-but it uses emulation. Treat that as acceptable for smoke checks and light local
-work, not as the preferred runtime for heavy pwn/rev debugging.
-
-The macOS default already keeps Docker pool workspaces outside the existing
-`~/CTF` workspace. Set the variable explicitly when running smoke checks so the
-operator shell shows that policy:
+Keep Docker workspaces outside `~/CTF`:
 
 ```bash
 export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspaces"
@@ -111,8 +70,40 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 ./scripts/ctfctl docker pool-stop --contest-id mac-docker-smoke --json
 ```
 
-Always stop the pool after smoke checks. Do not put secrets in Docker env vars,
-command arguments, or mounted workspace files.
+Always stop pool containers after smoke checks. Do not put secrets in Docker env
+vars, command arguments, or mounted workspace files.
+
+## Auth And Profiles
+
+Use the same external profile layout as Windows:
+
+```text
+~/.ctf-solver/platforms/<contest>.yaml
+~/.ctf-solver/secrets/<contest>.storage_state.json
+```
+
+```bash
+./scripts/ctfctl platform profile-check --config ~/.ctf-solver/platforms/<contest>.yaml --json
+./scripts/ctfctl auth storage-check --path ~/.ctf-solver/secrets/<contest>.storage_state.json --json
+```
+
+Do not copy real cookies, tokens, storage state, auth headers, or raw flags into
+repo files, prompts, public writeups, or issue trackers.
+
+## Legacy Worker Isolation
+
+Create worker homes only for legacy worker rehearsals:
+
+```bash
+./scripts/init-codex-workers.sh --count 5 --link-auth
+./scripts/ctf-worker-1 --dry-run
+```
+
+Expected legacy state:
+
+- `~/.codex-workers/worker-N/AGENTS.md` is slim.
+- `~/.codex-workers/worker-N/config.toml` does not copy global MCP entries.
+- `~/.codex-workers/worker-N/auth.json` is a local symlink only when `--link-auth` is intentionally used.
 
 ## Tunnel And Callback
 
@@ -123,14 +114,10 @@ Provider readiness is safe to check:
 ./scripts/ctfctl callback smoke --json
 ```
 
-Do not start a public tunnel during setup. Public callback smoke requires an
-explicit `--allow-public` flag and should only target the local dummy listener
-when the operator intentionally validates that path. Prefer `cloudflared` for
-HTTP/browser callbacks when it is installed.
+Do not start a public tunnel during setup. Public callback smoke requires
+`--allow-public` and should target only the local dummy listener.
 
 ## Local Verification
-
-Run only local/fake validation before using the Mac in a contest:
 
 ```bash
 python3 -m compileall -q ctf_runner
@@ -143,10 +130,8 @@ python3 -m pytest -q
 
 Acceptable Mac warnings:
 
-- `global_long_agents` when plain `codex` is reserved for an existing CTF
-  workspace and workers use `scripts/ctf-worker-*`.
-- `legacy_dreamhack_solver_mcp` when it exists only in global Codex config and
-  worker configs do not inherit it.
+- `global_long_agents` when plain `codex` is reserved for the existing CTF workspace.
+- `legacy_dreamhack_solver_mcp` when it exists only in global Codex config.
 - linux/amd64 Docker image warnings on an arm64 host.
 
-High-risk preflight findings should be fixed before running real interactive solvers.
+Fix high-risk preflight findings before running real interactive solvers.

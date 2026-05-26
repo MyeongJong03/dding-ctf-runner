@@ -4,6 +4,8 @@ Primary risks:
 
 - Cookie, token, browser storage, or API key leakage.
 - Raw flag leakage in git, telemetry, stdout, screenshots, writeups, or shell history.
+- Interactive Codex terminal history or pasted prompts leaking raw secrets, auth headers, storage state, or raw flags.
+- Operator files under `~/CTF/contests/<contest>/operator/` accidentally storing raw secrets, raw flags, callback payloads, or private exploit transcripts.
 - Solver output mixing raw flags or raw secrets into summaries, handoffs, telemetry, or state.
 - Raw exploit transcript leakage through worker handoff files.
 - Writeup draft or skill candidate leakage through git, stdout, chat, or public issue trackers.
@@ -16,6 +18,7 @@ Primary risks:
 - Accidental browser auth capture during setup.
 - Duplicate or low-confidence submissions consuming limited attempts.
 - Concurrent workers racing into duplicate claims or duplicate submits.
+- Interactive same-machine Codex sessions duplicating claims unintentionally.
 - Background worker processes running after the operator believes a contest is paused.
 - Stale worker PID files causing false running status or missed restarts.
 - Worker logs leaking raw candidates, auth material, or exploit output.
@@ -45,6 +48,18 @@ Controls:
 - `redact_text` on CLI and telemetry output.
 - Local-only writeups and private artifacts.
 - No public git push from runner workflows.
+- The default live workflow is interactive Codex swarm: operators run `ctfctl interactive ...`, then launch visible Codex sessions with `cd ~/CTF && codex`.
+- Every interactive Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
+- Windows WSL defaults to at most six Codex terminals; MacBook defaults to at most four.
+- Interactive `init` creates the operator directory when it is missing.
+- Interactive board state lives under `~/CTF/contests/<contest>/operator/`, outside this repo.
+- Operator files may contain `BOARD.md`, `board.json`, `solved.jsonl`, `external_solved.txt`, `stalled.jsonl`, `claims/`, and `memos/`, but must not contain raw cookies, tokens, auth headers, browser storage, passwords, private keys, shell history, or raw flags.
+- Same-machine interactive claims use local claim locks by default. `--allow-duplicate` is explicit and should be used only for intentional local duplicate solving. Cross-machine duplicate claims are out of scope and must be handled manually if the team cares.
+- Interactive self memos are limited to sanitized `memory`, `evidence`, `attempts`, `next_steps`, and `operator_notes`.
+- Stalled interactive challenges keep compact local handoffs only. They do not get writeups.
+- Interactive writeups are accepted-only and must be generated as Korean and English files named `[category]ChallengeNameWriteup.ko.md` and `[category]ChallengeNameWriteup.en.md`.
+- Solver or exploit code should be included completely in accepted writeups, but raw flags and secret-bearing runtime details remain redacted.
+- Background worker/supervisor/start-workers flows are legacy/advanced and should not be the normal live operation path.
 - Platform actions require `ctfctl` gates, `--live`, and `--confirm` where needed.
 - `ctfctl --mode setup|rehearsal|competition` separates setup, read-only rehearsal, and live competition execution. Setup blocks real challenge solve, live submit, instance start, browser login automation, and public tunnel exposure. Rehearsal permits real read-only ingest but blocks live submit and blocks real solve unless `--allow-real-solve-dry-run` is present. Competition requires `--confirm-competition`, an armed contest, and policy gates.
 - `ctfctl contest prestart` reports preflight, profile, storage-state summary, worker auth metadata, and queue counts without live traffic by default.

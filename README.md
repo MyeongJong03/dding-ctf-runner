@@ -1,41 +1,34 @@
 # dding CTF Runner
 
-`dding-ctf-runner` is a shell-first control plane for running CTF competition workflows with visible interactive Codex solver swarms. It is built around `ctfctl`, local operator files, explicit platform/submit guards, and local-only runtime state.
+`dding-ctf-runner` is a shell-first control plane for live CTF operations. The default live workflow is an interactive Codex swarm: the operator prepares board state with `ctfctl`, then opens several visible Codex terminals from `~/CTF`. Every Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
 
-This repository is intended to be public-safe. Real secrets, browser state, downloaded challenge material, generated writeups, state databases, and raw flags must stay outside git.
+This repository is public-safe by design. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, and raw flags outside git.
 
-## Features
+## What It Does
 
-- Preflight checks for WSL paths, Docker, browser readiness, worker isolation, Codex binary state, and tunnel tooling.
-- Interactive Codex swarm coordination through `ctfctl interactive`.
-- Local ingest and `brief.md` generation for attachment and text-only challenge material.
-- CTFd and generic read-only platform discovery with explicit `--live` and policy gates.
-- Submit planning with confidence, duplicate-hash, fake-like, cooldown, and wrong-answer guards.
-- Legacy worker solve loop and process supervisor for fake/local E2E and advanced automation tests.
-- Final fake competition full rehearsal covering preflight, fake discovery/ingest, arm, Docker pool, callback public-smoke, workers, postsolve, cleanup, and release-check. The current release target passes the mock full rehearsal and the Codex mini rehearsal with 3/3 local easy challenges accepted.
-- Local-only postsolve summaries, writeup drafts, skill candidates, and artifact archives.
-- Public release checks through `scripts/release-check.sh`, `scripts/fresh-clone-check.sh`, `scripts/history-scan.sh`, and `ctfctl repo public-check --json`.
+- Coordinates interactive Codex solvers with `ctfctl interactive`.
+- Syncs challenge metadata, downloads, and local briefs through policy-gated platform helpers.
+- Blocks same-machine duplicate claims by default.
+- Supports guarded submit and upload-submit through `ctfctl`.
+- Keeps operator board state, memos, accepted solves, stalled handoffs, and writeups local-only.
+- Provides Docker, callback, auth, download, sync, submit, and cleanup helpers.
+- Keeps legacy background worker/supervisor flows for advanced rehearsals only.
+- Runs public-safety checks before release.
 
 ## Requirements
 
-- WSL Ubuntu on the Linux filesystem, not `/mnt/c`.
 - Python 3.12.
-- Docker Desktop with WSL integration for container-backed challenge work.
-- Codex CLI for worker execution.
-- Playwright/Chromium for optional browser-based read-only discovery or manual storage capture.
-- Optional public tunnel provider only when a challenge explicitly requires it; none is bundled or started automatically.
+- Codex CLI for visible interactive solving.
+- Docker for pwn/rev workloads.
+- Playwright/Chromium only when browser-based discovery or manual storage capture is needed.
+- Optional tunnel tooling only when a challenge explicitly needs a public callback.
 
-macOS is supported as a secondary/mobile runner. Keep existing `~/CTF` and
-global Codex settings unchanged, launch workers only through `scripts/ctf-worker-*`,
-and set `CTF_DOCKER_WORKSPACE_ROOT` outside `~/CTF` before Docker pool smoke.
-Apple Silicon can run the linux/amd64 `ctf-pwn:latest` image through Docker
-Desktop emulation, but pwn/rev-heavy work should stay on the primary Windows WSL
-runner unless local timing is known to be acceptable.
+Use Windows WSL as the primary heavy runner. Keep this repo on the WSL Linux filesystem, not `/mnt/c`. macOS is supported as a secondary/mobile runner; Apple Silicon can use Docker Desktop emulation for linux/amd64 images, but pwn/rev-heavy work should prefer Windows WSL unless Mac timing has been validated.
 
 ## Quick Start
 
 ```bash
-git clone <repo-url>
+git clone <repo-url> dding-ctf-runner
 cd dding-ctf-runner
 
 python3 -m venv .venv
@@ -43,123 +36,101 @@ python3 -m venv .venv
 python3 -m pip install -e . pytest
 
 ./scripts/ctfctl preflight --deep --json
-./scripts/ctfctl fake-ctfd smoke --json
 ```
 
-Interactive event-day setup:
+Prepare the contest from the runner repo:
 
 ```bash
 export CONTEST_ID=<contest>
 export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
+export AGENTS=4
 
-./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
 ```
 
-Then open multiple terminals, `cd ~/CTF`, run interactive `codex`, paste one generated prompt per agent, and let each session loop through claim, solve, verify, submit, writeup, cleanup, and next claim. Same-machine duplicate claims are blocked by default; use `ctfctl interactive claim --allow-duplicate` only when duplicate solving is intentional.
+Open one terminal per agent and start plain interactive Codex from the CTF workspace:
 
-The legacy background worker/supervisor flow remains under advanced operations for rehearsals and compatibility tests. It is no longer the default quickstart.
-
-For real event day commands, use [OPERATIONS.md](OPERATIONS.md).
-
-## Modes And Gates
-
-- `setup`: configure local tools and profiles. Real challenge solving, live submit, instance start, browser login automation, and public tunnels are blocked.
-- `rehearsal`: read-only real platform sync can be run intentionally. Real solving is blocked unless a dry-run solve override is explicit; live submit remains blocked.
-- `competition`: real solve workers require `--confirm-competition` and an armed contest.
-
-`ctfctl contest start-workers` is legacy/advanced. It remains dry-run by default. Passing `--apply` launches supervised workers and writes PID/status/log files under `~/.ctf-solver/runner-state/contests/<contest>/workers/`.
-
-Live submit requires every gate:
-
-- contest is armed
-- arm state allows live submit, which is the competition arm default unless `--no-live-submit` is used
-- worker submit uses the built-in competition confirmation; manual platform submit still uses `--confirm`
-- platform policy allows submission
-- submit policy passes confidence, duplicate, fake-like, cooldown, and wrong-answer checks
-
-Setup and rehearsal always block real live submission. In competition, `policy.allow_submission: true` lets high-confidence worker candidates auto-submit after the submit policy passes; `policy.allow_submission: false` keeps solving read-only.
-
-## Secrets And Runtime State
-
-Keep secrets outside this repository, for example:
-
-```text
-~/.ctf-solver/secrets/
-~/.ctf-solver/platforms/
-~/CTF/contests/
-~/.ctf-solver/runner-state/
+```bash
+cd ~/CTF
+codex
 ```
 
-Never commit or print raw cookies, tokens, auth headers, browser storage, API keys, passwords, private keys, shell history, real flags, downloaded private challenge files, queue DBs, callback logs, or generated writeups.
+Paste one generated prompt into each Codex terminal. Recommended width:
 
-Ignored runtime paths include `contests/`, `state/`, `runner-state/`, `secrets/`, `downloads/`, `writeups/`, `browser-artifacts/`, `callback-hits/`, `callbacks/`, `tunnels/`, `.codex-workers/`, `*.sqlite3`, `*.db`, `.env*`, `auth.json`, and storage-state files.
+- Windows WSL: up to 6 Codex terminals.
+- MacBook: up to 4 Codex terminals.
 
-The release/public checks now also fail on repo-local runtime directories or sensitive filenames, even when they are ignored. Keep all contest state, queue databases, profiles, callback hits, Docker workspaces, and postsolve material outside the repository before publishing.
+Inside the same computer, duplicate claims are blocked by default. Use `ctfctl interactive claim --allow-duplicate` only when you intentionally want multiple local Codex sessions on the same problem. Duplicate claims across different computers are not coordinated.
 
-## Package Policy
+## Solver Loop
 
-`uv.lock` is committed because the current project has no third-party runtime dependencies and the lockfile is small and public-safe. If future optional dependency groups grow, update the lockfile intentionally and run the release checks before publishing.
+Each Codex terminal should keep going until the contest ends, the operator stops it, or there is no useful next work:
+
+```bash
+ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind memory --append "short fact" --json
+ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
+ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
+ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
+ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
+```
+
+Writeups are accepted-only. Accepted challenges produce both Korean and English files named:
+
+```text
+[category]ChallengeNameWriteup.ko.md
+[category]ChallengeNameWriteup.en.md
+```
+
+If solver or exploit code exists, include the complete code in fenced markdown blocks. Unsolved challenges do not get writeups; leave compact `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records instead.
+
+## Runtime State
+
+Keep runtime state outside this repo:
+
+```text
+~/.ctf-solver/platforms/
+~/.ctf-solver/secrets/
+~/.ctf-solver/runner-state/
+~/CTF/contests/
+```
+
+Never print, commit, or copy raw cookies, tokens, auth headers, browser storage, passwords, private keys, shell history, real flags, downloaded private challenge files, callback hits, or generated writeups.
+
+## Legacy Background Workers
+
+`ctfctl contest start-workers`, `worker_loop`, `worker_supervisor`, `multi_worker`, and `scripts/ctf-worker-*` remain available for fake/local E2E, compatibility testing, and deliberate advanced automation. They are not the recommended live contest workflow.
+
+For event-day commands, use [OPERATIONS.md](OPERATIONS.md). For the full user guide, use [GUIDE.md](GUIDE.md).
 
 ## Release Check
 
-Before publishing:
+Before publishing or merging public docs:
 
 ```bash
 python3 -m compileall -q ctf_runner
 python3 -m pytest -q
-./scripts/ctfctl preflight --deep --json
-./scripts/ctfctl contest full-rehearsal --contest-id final-fake --workers 5 --solver mock --json
-./scripts/ctfctl contest full-rehearsal --contest-id final-fake-codex --workers 3 --max-parallel-codex 2 --solver codex --allow-codex-call --json
-./scripts/ctfctl repo public-check --json
 ./scripts/release-check.sh
+./scripts/ctfctl repo public-check --json
 ./scripts/fresh-clone-check.sh
 ./scripts/history-scan.sh
 git diff --check
 ```
 
-Optional local-only smoke checks:
-
-```bash
-./scripts/ctfctl fake-ctfd smoke --json
-./scripts/ctfctl worker local-e2e --workers 3 --solver mock --fake-ctfd --json
-./scripts/ctfctl contest supervisor-smoke --workers 3 --solver mock --fake-ctfd --json
-./scripts/ctfctl docker benchmark --image ctf-pwn:latest --json
-./scripts/ctfctl docker pool-smoke --contest-id local-docker-smoke --workers 2 --json
-./scripts/ctfctl docker pool-stop --contest-id local-docker-smoke --json
-./scripts/ctfctl callback public-smoke --contest-id local-callback-smoke --provider auto --allow-public --json
-```
-
-Final fake rehearsal acceptance requires mock `status: ok`, Codex mini `status: ok`, at least the required local easy set solved, duplicate claims/submissions at zero, `raw_leak_detected: false`, and zero active workers, tunnels, callback listeners, and Docker pool containers after cleanup. The deterministic Codex mini release fixture target is 3/3 solved and accepted.
-
-## GitHub Publish Checklist
-
-Before the first public push:
-
-- Run the release commands above from the WSL repo, not `/mnt/c`.
-- Run `git status --short` and keep only source, docs, scripts, tests, and config intended for publication.
-- Run `git log --stat`, `git grep` for sensitive patterns, and `scripts/history-scan.sh`.
-- If commit history is noisy or uncertain, create a clean public branch or a fresh public repository with a squashed initial commit.
-- Do not push local runtime history, generated challenge content, real platform profiles, browser storage, queue databases, callback logs, downloads, or postsolve output.
-
-## Limitations
-
-- Real platform variants differ; generic discovery is bounded and read-only, not a universal crawler.
-- Tunnel providers are detected but not bundled or launched by default.
-- Competition auto-submit is intentionally gated behind contest arm, profile submission policy, and submit policy. Use `contest arm --no-live-submit` or `policy.allow_submission: false` to keep solving without live submissions.
-- Interactive writeups are accepted-only and must be generated in Korean and English. If solver/exploit code exists, include the full code in the local writeup. All writeups remain local-only until reviewed.
+Do not push public git changes from this repo during live CTF work.
 
 ## Documentation
 
-- [GUIDE.md](GUIDE.md): end-to-end operating guide.
-- [OPERATIONS.md](OPERATIONS.md): short event-day command guide.
-- [docs/architecture.md](docs/architecture.md): system architecture.
-- [docs/setup-windows-wsl.md](docs/setup-windows-wsl.md): WSL and worker setup.
+- [GUIDE.md](GUIDE.md): end-to-end interactive operating guide.
+- [OPERATIONS.md](OPERATIONS.md): short contest-day runbook.
+- [docs/interactive-operations.md](docs/interactive-operations.md): interactive CLI and operator file details.
+- [docs/contest-operations.md](docs/contest-operations.md): legacy/advanced background worker controls.
+- [docs/worker-loop.md](docs/worker-loop.md): legacy worker loop reference.
+- [docs/postsolve.md](docs/postsolve.md): accepted-only writeup and local postsolve policy.
+- [docs/setup-windows-wsl.md](docs/setup-windows-wsl.md): Windows WSL setup.
 - [docs/setup-macos.md](docs/setup-macos.md): macOS secondary runner setup.
-- [docs/platform-automation.md](docs/platform-automation.md): platform profiles and read-only sync.
-- [docs/interactive-operations.md](docs/interactive-operations.md): default interactive Codex swarm workflow.
-- [docs/contest-operations.md](docs/contest-operations.md): arm/disarm and worker commands.
-- [docs/postsolve.md](docs/postsolve.md): local-only postsolve and archive policy.
-- [docs/threat-model.md](docs/threat-model.md): risks and mitigations.
+- [docs/threat-model.md](docs/threat-model.md): public-safety and live-operation risks.
