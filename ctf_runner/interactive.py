@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -518,6 +519,176 @@ def metrics_compare(before: str | Path, after: str | Path) -> dict[str, Any]:
     return {"status": "ok", "before": _display(Path(before).expanduser()), "after": _display(Path(after).expanduser()), "deltas": deltas}
 
 
+def metrics_publish_snapshot(
+    contest_id: str,
+    *,
+    output_root: str | Path | None = None,
+    contest_ended: bool = False,
+    confirm_public_safe: bool = False,
+    allow_active_contest: bool = False,
+) -> dict[str, Any]:
+    if not contest_ended and not (allow_active_contest and confirm_public_safe):
+        return {
+            "status": "blocked",
+            "reason": "active_contest_public_snapshot_requires_contest_ended_or_allow_active_contest_with_confirm_public_safe",
+            "contest_id": contest_id,
+            "public_safe": False,
+        }
+
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    metrics_dir = _ensure_metrics_files(root)
+    events = _read_jsonl(metrics_dir / "events.jsonl")
+    sessions_rows = _read_jsonl(metrics_dir / "sessions.jsonl")
+    summary = _build_metrics_summary(contest_id, events, sessions_rows)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    contest_events = [row for row in events if row.get("contest_id") == contest_id]
+    challenge_index = _public_challenge_index(board, contest_events, root)
+    attempts_total = _attempts_total(contest_events)
+
+    summary_public = {
+        **summary,
+        "schema": "interactive_metrics_public_snapshot_v1",
+        "public_safe": True,
+        "source": "local_operator_metrics",
+        "contest_ended": bool(contest_ended),
+        "snapshot_generated_at": utc_now(),
+        "challenge_count": len(challenge_index),
+        "attempts_total": attempts_total,
+    }
+
+    out_root = Path(output_root).expanduser() if output_root else get_paths().repo / "metrics" / "contests" / _safe_slug(contest_id)
+    out_root.mkdir(parents=True, exist_ok=True)
+    files = {
+        "summary": out_root / "summary.public.json",
+        "solved": out_root / "solved.public.md",
+        "stalled": out_root / "stalled.public.md",
+        "approaches": out_root / "approaches.public.md",
+        "regression": out_root / "regression.public.md",
+    }
+    _write_json(files["summary"], summary_public)
+    files["solved"].write_text(_render_public_solved(contest_id, challenge_index, root), encoding="utf-8")
+    files["stalled"].write_text(_render_public_stalled(contest_id, challenge_index, root), encoding="utf-8")
+    files["approaches"].write_text(_render_public_approaches(contest_id, challenge_index, contest_events), encoding="utf-8")
+    files["regression"].write_text(_render_public_regression(contest_id, summary_public), encoding="utf-8")
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "public_safe": True,
+        "output_root": _display(out_root),
+        "files": {key: _display(path) for key, path in files.items()},
+    }
+
+
+def metrics_dashboard(*, output: str | Path | None = None) -> dict[str, Any]:
+    repo = get_paths().repo
+    path = Path(output).expanduser() if output else repo / "metrics" / "dashboard.md"
+    metrics_root = path.parent if output else repo / "metrics"
+    run_files = sorted((metrics_root / "runs").glob("*.json"))
+    snapshot_files = sorted((metrics_root / "contests").glob("*/summary.public.json"))
+    snapshots = [_read_json_file(item) for item in snapshot_files]
+    runs = [_read_json_file(item) for item in run_files]
+    latest_commit = _git_value(["rev-parse", "--short", "HEAD"]) or "unknown"
+
+    solved = sum(_number(item.get("solved_count")) for item in snapshots)
+    stalled = sum(_number(item.get("stalled_count")) for item in snapshots)
+    writeup_ko = sum(_number(item.get("writeup_ko_count")) for item in snapshots)
+    writeup_en = sum(_number(item.get("writeup_en_count")) for item in snapshots)
+    cleanup = sum(_number(item.get("cleanup_count")) for item in snapshots)
+    tokens = sum(_number(item.get("tokens_total_observed")) for item in snapshots if item.get("tokens_total_observed") is not None)
+    avg_values = [_number(item.get("avg_time_to_solve_sec")) for item in snapshots if item.get("avg_time_to_solve_sec") is not None]
+    avg_time = round(sum(avg_values) / len(avg_values), 3) if avg_values else None
+
+    lines = [
+        "# Interactive Metrics Dashboard",
+        "",
+        f"- generated_at: {utc_now()}",
+        f"- latest_commit: {latest_commit}",
+        f"- total_public_snapshots: {len(snapshots)}",
+        f"- baseline_runs: {len(runs)}",
+        f"- solved_total: {solved}",
+        f"- stalled_total: {stalled}",
+        f"- writeup_ko_total: {writeup_ko}",
+        f"- writeup_en_total: {writeup_en}",
+        f"- cleanup_total: {cleanup}",
+        f"- tokens_total_observed: {tokens if any(item.get('tokens_total_observed') is not None for item in snapshots) else 'unknown'}",
+        f"- avg_time_to_solve_sec: {avg_time if avg_time is not None else 'unknown'}",
+        "",
+    ]
+    if snapshots:
+        lines.extend(["## Public Snapshots", "", "| Contest | Solved | Stalled | Tokens | Avg Solve Sec | Generated |", "| --- | ---: | ---: | ---: | ---: | --- |"])
+        for item in snapshots:
+            lines.append(
+                f"| {_md(str(item.get('contest_id') or 'unknown'))} | {_number(item.get('solved_count'))} | {_number(item.get('stalled_count'))} | "
+                f"{item.get('tokens_total_observed') if item.get('tokens_total_observed') is not None else 'unknown'} | "
+                f"{item.get('avg_time_to_solve_sec') if item.get('avg_time_to_solve_sec') is not None else 'unknown'} | "
+                f"{_md(str(item.get('snapshot_generated_at') or item.get('generated_at') or ''))} |"
+            )
+    else:
+        lines.extend(["## Public Snapshots", "", "No public-safe contest snapshots exist yet. After a contest ends, run `ctfctl interactive metrics publish-snapshot` and then regenerate this dashboard."])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"status": "ok", "dashboard_path": _display(path), "public_snapshot_count": len(snapshots), "baseline_run_count": len(runs)}
+
+
+def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None = None) -> dict[str, Any]:
+    repo = get_paths().repo
+    commit = _git_value(["rev-parse", "--short", "HEAD"]) or "unknown"
+    branch = _git_value(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
+    timestamp = utc_now()
+    safe_name = _safe_slug(name or "baseline")
+    filename = f"{timestamp.replace(':', '').replace('-', '').split('.')[0]}-{_safe_slug(commit)}-{safe_name}.json"
+    out_dir = Path(output_dir).expanduser() if output_dir else repo / "metrics" / "runs"
+    path = out_dir / filename
+    data = {
+        "schema": "interactive_metrics_baseline_v1",
+        "timestamp": timestamp,
+        "git_commit": commit,
+        "branch": branch,
+        "pytest_status": "unknown",
+        "pytest_note": "not_run_lightweight_baseline",
+        "interactive_commands": {
+            "metrics_record": True,
+            "metrics_summary": True,
+            "metrics_compare": True,
+            "metrics_report": True,
+            "metrics_publish_snapshot": True,
+            "metrics_dashboard": True,
+            "metrics_baseline": True,
+            "metrics_compare_public": True,
+        },
+        "prompt_policy_summary": {
+            "local_raw_flag_output_allowed": True,
+            "public_upload_commit_paste_flags_writeups_exploits_secrets_forbidden_during_contest": True,
+            "public_snapshot_requires_contest_ended_or_explicit_confirm": True,
+            "stalled_challenges_get_metrics_not_writeups": True,
+        },
+    }
+    _write_json(path, data)
+    return {"status": "ok", "baseline_path": _display(path), "baseline": data}
+
+
+def metrics_compare_public(before: str | Path, after: str | Path) -> dict[str, Any]:
+    before_data = _read_json_file(Path(before).expanduser())
+    after_data = _read_json_file(Path(after).expanduser())
+    keys = [
+        "solved_count",
+        "stalled_count",
+        "accepted_count",
+        "writeup_ko_count",
+        "writeup_en_count",
+        "cleanup_count",
+        "tokens_total_observed",
+        "avg_time_to_solve_sec",
+        "attempts_total",
+    ]
+    deltas: dict[str, Any] = {}
+    for key in keys:
+        deltas[key] = _delta(before_data.get(key), after_data.get(key))
+    return {"status": "ok", "before": _display(Path(before).expanduser()), "after": _display(Path(after).expanduser()), "public_safe": True, "deltas": deltas}
+
+
 def metrics_report(contest_id: str, *, output: str | Path | None = None) -> dict[str, Any]:
     summary = metrics_summary(contest_id)
     root = operator_root(contest_id)
@@ -1014,6 +1185,207 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "tokens_total_observed": tokens_total if tokens_seen else None,
         "avg_time_to_solve_sec": round(sum(solve_durations) / len(solve_durations), 3) if solve_durations else None,
     }
+
+
+def _public_challenge_index(board: Mapping[str, Any], events: list[dict[str, Any]], root: Path) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in board.get("challenges", []):
+        if not isinstance(item, Mapping):
+            continue
+        challenge_id = str(item.get("challenge_id") or item.get("name") or "")
+        if not challenge_id:
+            continue
+        result[challenge_id] = {
+            "challenge_id": challenge_id,
+            "name": redact_text(str(item.get("name") or challenge_id)),
+            "category": redact_text(str(item.get("category") or "")),
+            "status": redact_text(str(item.get("status") or "todo")),
+            "approaches": set(),
+            "stalled_reasons": [],
+        }
+    for row in events:
+        challenge_id = str(row.get("challenge_id") or "")
+        if not challenge_id:
+            continue
+        item = result.setdefault(
+            challenge_id,
+            {
+                "challenge_id": challenge_id,
+                "name": challenge_id,
+                "category": "",
+                "status": "",
+                "approaches": set(),
+                "stalled_reasons": [],
+            },
+        )
+        data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
+        event = str(row.get("event") or "")
+        if event in {"submit", "accepted", "solved", "external_solved"}:
+            item["status"] = "solved"
+        elif event == "stalled" and item.get("status") != "solved":
+            item["status"] = "stalled"
+            reason = _safe_public_note(str(data.get("reason") or "stalled"))
+            if reason:
+                item["stalled_reasons"].append(reason)
+        approach = data.get("approach") or data.get("approach_name") or data.get("method")
+        if isinstance(approach, str) and approach.strip():
+            item["approaches"].add(_safe_public_note(approach, limit=80))
+    for row in _read_jsonl(root / "stalled.jsonl"):
+        challenge_id = str(row.get("challenge_id") or "")
+        if not challenge_id:
+            continue
+        item = result.setdefault(
+            challenge_id,
+            {"challenge_id": challenge_id, "name": str(row.get("name") or challenge_id), "category": "", "status": "stalled", "approaches": set(), "stalled_reasons": []},
+        )
+        item["status"] = "stalled"
+        reason = _safe_public_note(str(row.get("reason") or "stalled"))
+        if reason:
+            item["stalled_reasons"].append(reason)
+    return result
+
+
+def _attempts_total(events: list[dict[str, Any]]) -> int | None:
+    total = 0
+    seen = False
+    for row in events:
+        event = str(row.get("event") or "")
+        data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
+        if event in {"attempt", "attempts"}:
+            total += 1
+            seen = True
+        value = data.get("attempts_total") or data.get("attempt_count")
+        if isinstance(value, (int, float)):
+            total += int(value)
+            seen = True
+    return total if seen else None
+
+
+def _render_public_solved(contest_id: str, challenges: Mapping[str, Mapping[str, Any]], root: Path) -> str:
+    solved_ids = {str(row.get("challenge_id")) for row in _read_jsonl(root / "solved.jsonl") if row.get("challenge_id")}
+    solved_ids.update(cid for cid, item in challenges.items() if str(item.get("status") or "") == "solved")
+    lines = [f"# Solved Public Metrics: {_md(contest_id)}", "", "Public-safe solved list. No flags, writeup bodies, or exploit bodies are included.", ""]
+    if not solved_ids:
+        lines.append("- No solved challenges recorded.")
+        return "\n".join(lines) + "\n"
+    lines.extend(["| Category | Challenge | Status |", "| --- | --- | --- |"])
+    for cid in sorted(solved_ids):
+        item = challenges.get(cid, {})
+        lines.append(f"| {_md(str(item.get('category') or ''))} | {_md(str(item.get('name') or cid))} | solved |")
+    return "\n".join(lines) + "\n"
+
+
+def _render_public_stalled(contest_id: str, challenges: Mapping[str, Mapping[str, Any]], root: Path) -> str:
+    stalled = [(cid, item) for cid, item in challenges.items() if str(item.get("status") or "") == "stalled"]
+    lines = [f"# Stalled Public Metrics: {_md(contest_id)}", "", "Unsolved challenges are recorded as stalled metrics only. This file intentionally contains no writeup.", ""]
+    if not stalled:
+        lines.append("- No stalled challenges recorded.")
+        return "\n".join(lines) + "\n"
+    lines.extend(["| Category | Challenge | High-level blocker |", "| --- | --- | --- |"])
+    for cid, item in sorted(stalled, key=lambda pair: (str(pair[1].get("category") or ""), str(pair[1].get("name") or pair[0]))):
+        reasons = item.get("stalled_reasons") if isinstance(item.get("stalled_reasons"), list) else []
+        blocker = _dedupe_join([str(reason) for reason in reasons]) or _memo_public_blocker(root, str(cid)) or "stalled"
+        lines.append(f"| {_md(str(item.get('category') or ''))} | {_md(str(item.get('name') or cid))} | {_md(blocker)} |")
+    return "\n".join(lines) + "\n"
+
+
+def _render_public_approaches(contest_id: str, challenges: Mapping[str, Mapping[str, Any]], events: list[dict[str, Any]]) -> str:
+    lines = [f"# Approaches Public Metrics: {_md(contest_id)}", "", "Approaches are high-level labels only. Solver, exploit, and writeup bodies are not included.", ""]
+    observed: list[tuple[str, str, str]] = []
+    for cid, item in challenges.items():
+        approaches = item.get("approaches")
+        if isinstance(approaches, set):
+            for approach in sorted(approaches):
+                observed.append((str(item.get("category") or ""), str(item.get("name") or cid), approach))
+    if not observed:
+        labels = sorted({str((row.get("data") or {}).get("category") or row.get("event") or "") for row in events if isinstance(row.get("data"), Mapping)})
+        observed = [("", "contest", _safe_public_note(label, limit=80)) for label in labels if label]
+    if not observed:
+        lines.append("- No approach labels recorded.")
+        return "\n".join(lines) + "\n"
+    lines.extend(["| Category | Challenge | Approach |", "| --- | --- | --- |"])
+    for category, name, approach in observed:
+        lines.append(f"| {_md(category)} | {_md(name)} | {_md(approach)} |")
+    return "\n".join(lines) + "\n"
+
+
+def _render_public_regression(contest_id: str, summary: Mapping[str, Any]) -> str:
+    lines = [
+        f"# Regression Public Metrics: {_md(contest_id)}",
+        "",
+        f"- solved_count: {summary.get('solved_count')}",
+        f"- stalled_count: {summary.get('stalled_count')}",
+        f"- accepted_count: {summary.get('accepted_count')}",
+        f"- writeup_ko_count: {summary.get('writeup_ko_count')}",
+        f"- writeup_en_count: {summary.get('writeup_en_count')}",
+        f"- cleanup_count: {summary.get('cleanup_count')}",
+        f"- tokens_total_observed: {summary.get('tokens_total_observed') if summary.get('tokens_total_observed') is not None else 'unknown'}",
+        f"- avg_time_to_solve_sec: {summary.get('avg_time_to_solve_sec') if summary.get('avg_time_to_solve_sec') is not None else 'unknown'}",
+        f"- attempts_total: {summary.get('attempts_total') if summary.get('attempts_total') is not None else 'unknown'}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _memo_public_blocker(root: Path, challenge_id: str) -> str:
+    board = _read_board(root, "")
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id}
+    challenge_dir = _challenge_path(str(board.get("contest_id") or ""), item)
+    for name in ("next_steps.md", "operator_notes.md", "attempts.md"):
+        path = challenge_dir / name
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip().lstrip("- ").strip()
+            if line and not line.startswith("#"):
+                return _safe_public_note(line)
+    return ""
+
+
+def _safe_public_note(value: str, *, limit: int = 160) -> str:
+    text = redact_text(str(value or "").replace("\n", " "))
+    text = re.sub(r"(?i)\b[A-Za-z0-9_.-]*(?:token|session|cookie|secret|password|passwd|api[_-]?key|storage_state)[A-Za-z0-9_.-]*\b", "[REDACTED]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def _dedupe_join(values: Iterable[str]) -> str:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = _safe_public_note(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return "; ".join(result[:3])
+
+
+def _git_value(args: list[str]) -> str | None:
+    try:
+        completed = subprocess.run(["git", *args], cwd=get_paths().repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        return None
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else None
+
+
+def _number(value: Any) -> int | float:
+    return value if isinstance(value, (int, float)) else 0
+
+
+def _delta(before_value: Any, after_value: Any) -> int | float | None:
+    if isinstance(before_value, (int, float)) and isinstance(after_value, (int, float)):
+        return after_value - before_value
+    if before_value is None and isinstance(after_value, (int, float)):
+        return after_value
+    if isinstance(before_value, (int, float)) and after_value is None:
+        return -before_value
+    return None
+
+
+def _md(value: str) -> str:
+    return redact_text(str(value)).replace("|", "\\|")
 
 
 def _parse_timestamp(value: str) -> datetime | None:

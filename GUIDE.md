@@ -283,7 +283,20 @@ ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 ```
 
-Metrics are for local performance tracking across updates. They must not contain auth material or be copied into public repos during an active contest.
+Metrics are for local performance tracking across updates. Local raw metrics are private operator state and must not be copied into public repos during an active contest.
+
+GitHub metrics are public-safe snapshots only. Use:
+
+```bash
+ctfctl interactive metrics baseline --name before-change --json
+ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json
+ctfctl interactive metrics dashboard --json
+ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
+```
+
+`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, and observed token totals when present. They must not include raw flags, writeup bodies, exploit bodies, cookies, sessions, browser storage, private keys, or auth material.
+
+During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: memo/attempts/next_steps -> metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
 
 ## 9. Callback, Docker, Submit, And Cleanup Helpers
 

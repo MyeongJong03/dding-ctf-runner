@@ -103,7 +103,16 @@ Keep runtime state outside this repo:
 
 Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, auth material, downloaded private challenge files, or callback hits to public services, public repositories, public pastes, issue trackers, or external writeup locations.
 
-Interactive metrics are stored under the operator root in `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`. These files are local runtime state and stay outside this repo.
+Interactive metrics are stored under the operator root in `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`. These files are local raw metrics and stay outside this repo.
+
+GitHub-managed metrics must be public-safe snapshots only:
+
+- Do not upload contest flags, writeups, exploit bodies, auth material, or private artifacts during an active contest.
+- Unsolved challenges get stalled metrics with high-level blockers and next steps, not writeups.
+- After an accepted solve, run submit -> ko/en writeup -> cleanup -> metrics update -> next challenge.
+- After a stall, record memo/attempts/next_steps -> metrics update -> next challenge.
+- At contest end, run `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended`, then `ctfctl interactive metrics dashboard`, then optionally commit the generated public-safe files.
+- During a contest, `publish-snapshot` is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided.
 
 ## Legacy Background Workers
 

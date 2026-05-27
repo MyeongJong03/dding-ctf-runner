@@ -195,11 +195,35 @@ ctfctl interactive metrics record --contest-id "$CONTEST_ID" --agent agent-1 --e
 ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics compare --before before-summary.json --after after-summary.json --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics baseline --name before-change --json
+ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json
+ctfctl interactive metrics dashboard --json
+ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
 ```
 
 The summary includes event counts, session count, claimed/solved/stalled/submit
 counts, accepted/writeup/cleanup counts, observed token totals when present, and
 average time to solve when claim and solve timestamps are available.
+
+Local raw metrics are private. GitHub-managed metrics must be generated through
+public-safe snapshots only. `publish-snapshot` creates
+`summary.public.json`, `solved.public.md`, `stalled.public.md`,
+`approaches.public.md`, and `regression.public.md` under
+`metrics/contests/<contest-id>` by default. These files may include challenge
+names, categories, elapsed times, high-level approach labels, stalled blockers,
+counts, and observed token totals, but must not include raw flags, cookies,
+sessions, browser storage, private keys, auth material, exploit bodies, or full
+writeup bodies.
+
+During an active contest, do not upload contest writeups, flags, exploits, or
+private artifacts. Public snapshot export is blocked unless the contest is ended
+with `--contest-ended` or the operator explicitly provides both
+`--allow-active-contest` and `--confirm-public-safe`. Unsolved challenges get
+stalled metrics with memo/attempts/next_steps, not writeups. After an accepted
+solve, use submit -> writeup ko/en -> cleanup -> metrics update -> next
+challenge. After a stall, use memo/attempts/next_steps -> metrics update -> next
+challenge. At contest end, use publish-snapshot -> dashboard -> optional git
+commit.
 
 ## Cleanup Policy
 

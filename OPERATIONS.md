@@ -132,12 +132,22 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 
 Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, cookies, tokens, sessions, browser storage, auth headers, passwords, private keys, callback hits, or downloaded private files. Store submitted flags as hashes in runner state.
 
-Record/update local metrics when comparing runner changes:
+Record/update local metrics when comparing runner changes. Local raw metrics are private operator state:
 
 ```bash
 ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 ```
+
+GitHub metrics are public-safe snapshots only. Do not upload contest writeups, flags, exploit bodies, auth material, or private artifacts during an active contest. Unsolved challenges get stalled metrics with compact blockers, not writeups.
+
+Use this operational order:
+
+- Accepted solve: submit -> writeup ko/en -> cleanup -> metrics update -> next challenge.
+- Stalled challenge: memo/attempts/next_steps -> metrics update -> next challenge.
+- Contest end: `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json` -> `ctfctl interactive metrics dashboard --json` -> optional git commit.
+
+`publish-snapshot` is blocked during a contest unless both `--allow-active-contest` and `--confirm-public-safe` are explicitly set.
 
 ## 8. Legacy Background Workers
 

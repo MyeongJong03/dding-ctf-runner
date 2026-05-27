@@ -63,8 +63,12 @@ from .interactive import (
     init_operator as interactive_init_operator,
     mark_external_solved as interactive_mark_external_solved,
     mark_stalled as interactive_mark_stalled,
+    metrics_baseline as interactive_metrics_baseline,
     memo_update as interactive_memo_update,
     metrics_compare as interactive_metrics_compare,
+    metrics_compare_public as interactive_metrics_compare_public,
+    metrics_dashboard as interactive_metrics_dashboard,
+    metrics_publish_snapshot as interactive_metrics_publish_snapshot,
     metrics_record as interactive_metrics_record,
     metrics_report as interactive_metrics_report,
     metrics_summary as interactive_metrics_summary,
@@ -440,6 +444,33 @@ def _cmd_interactive_metrics_compare(args: argparse.Namespace) -> int:
 
 def _cmd_interactive_metrics_report(args: argparse.Namespace) -> int:
     _print_json(interactive_metrics_report(args.contest_id, output=args.output))
+    return 0
+
+
+def _cmd_interactive_metrics_publish_snapshot(args: argparse.Namespace) -> int:
+    data = interactive_metrics_publish_snapshot(
+        args.contest_id,
+        output_root=args.output_root,
+        contest_ended=args.contest_ended,
+        confirm_public_safe=args.confirm_public_safe,
+        allow_active_contest=args.allow_active_contest,
+    )
+    _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_metrics_dashboard(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_dashboard(output=args.output))
+    return 0
+
+
+def _cmd_interactive_metrics_baseline(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_baseline(name=args.name, output_dir=args.output_dir))
+    return 0
+
+
+def _cmd_interactive_metrics_compare_public(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_compare_public(args.before, args.after))
     return 0
 
 
@@ -2105,6 +2136,28 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_metrics_report.add_argument("--output")
     interactive_metrics_report.add_argument("--json", action="store_true")
     interactive_metrics_report.set_defaults(func=_cmd_interactive_metrics_report)
+    interactive_metrics_publish = interactive_metrics_sub.add_parser("publish-snapshot")
+    interactive_metrics_publish.add_argument("--contest-id", required=True)
+    interactive_metrics_publish.add_argument("--output-root")
+    interactive_metrics_publish.add_argument("--contest-ended", action="store_true")
+    interactive_metrics_publish.add_argument("--confirm-public-safe", action="store_true")
+    interactive_metrics_publish.add_argument("--allow-active-contest", action="store_true")
+    interactive_metrics_publish.add_argument("--json", action="store_true")
+    interactive_metrics_publish.set_defaults(func=_cmd_interactive_metrics_publish_snapshot)
+    interactive_metrics_dashboard = interactive_metrics_sub.add_parser("dashboard")
+    interactive_metrics_dashboard.add_argument("--output")
+    interactive_metrics_dashboard.add_argument("--json", action="store_true")
+    interactive_metrics_dashboard.set_defaults(func=_cmd_interactive_metrics_dashboard)
+    interactive_metrics_baseline = interactive_metrics_sub.add_parser("baseline")
+    interactive_metrics_baseline.add_argument("--name")
+    interactive_metrics_baseline.add_argument("--output-dir")
+    interactive_metrics_baseline.add_argument("--json", action="store_true")
+    interactive_metrics_baseline.set_defaults(func=_cmd_interactive_metrics_baseline)
+    interactive_metrics_compare_public = interactive_metrics_sub.add_parser("compare-public")
+    interactive_metrics_compare_public.add_argument("--before", required=True)
+    interactive_metrics_compare_public.add_argument("--after", required=True)
+    interactive_metrics_compare_public.add_argument("--json", action="store_true")
+    interactive_metrics_compare_public.set_defaults(func=_cmd_interactive_metrics_compare_public)
 
     contest = sub.add_parser("contest")
     contest_sub = contest.add_subparsers(dest="contest_command", required=True)
