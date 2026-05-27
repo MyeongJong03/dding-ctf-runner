@@ -64,6 +64,10 @@ from .interactive import (
     mark_external_solved as interactive_mark_external_solved,
     mark_stalled as interactive_mark_stalled,
     memo_update as interactive_memo_update,
+    metrics_compare as interactive_metrics_compare,
+    metrics_record as interactive_metrics_record,
+    metrics_report as interactive_metrics_report,
+    metrics_summary as interactive_metrics_summary,
     release_claim as interactive_release_claim,
     solver_prompt as interactive_solver_prompt,
     submit_flag_file as interactive_submit_flag_file,
@@ -401,6 +405,41 @@ def _cmd_interactive_prompt(args: argparse.Namespace) -> int:
         _print_json(data)
     else:
         print(redact_text(str(data.get("prompt") or "")))
+    return 0
+
+
+def _cmd_interactive_metrics_record(args: argparse.Namespace) -> int:
+    try:
+        data_json = json.loads(args.data_json) if args.data_json else {}
+    except json.JSONDecodeError as exc:
+        _print_json({"status": "error", "reason": f"invalid_data_json:{exc.msg}"})
+        return 2
+    if not isinstance(data_json, dict):
+        _print_json({"status": "error", "reason": "data_json_must_be_object"})
+        return 2
+    data = interactive_metrics_record(
+        args.contest_id,
+        agent=args.agent,
+        event=args.event,
+        challenge_id=args.challenge_id,
+        data=data_json,
+    )
+    _print_json(data)
+    return 0
+
+
+def _cmd_interactive_metrics_summary(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_summary(args.contest_id))
+    return 0
+
+
+def _cmd_interactive_metrics_compare(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_compare(args.before, args.after))
+    return 0
+
+
+def _cmd_interactive_metrics_report(args: argparse.Namespace) -> int:
+    _print_json(interactive_metrics_report(args.contest_id, output=args.output))
     return 0
 
 
@@ -2042,6 +2081,30 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prompt.add_argument("--agent", required=True)
     interactive_prompt.add_argument("--json", action="store_true")
     interactive_prompt.set_defaults(func=_cmd_interactive_prompt)
+    interactive_metrics = interactive_sub.add_parser("metrics")
+    interactive_metrics_sub = interactive_metrics.add_subparsers(dest="interactive_metrics_command", required=True)
+    interactive_metrics_record = interactive_metrics_sub.add_parser("record")
+    interactive_metrics_record.add_argument("--contest-id", required=True)
+    interactive_metrics_record.add_argument("--agent")
+    interactive_metrics_record.add_argument("--event", required=True)
+    interactive_metrics_record.add_argument("--challenge-id")
+    interactive_metrics_record.add_argument("--data-json")
+    interactive_metrics_record.add_argument("--json", action="store_true")
+    interactive_metrics_record.set_defaults(func=_cmd_interactive_metrics_record)
+    interactive_metrics_summary = interactive_metrics_sub.add_parser("summary")
+    interactive_metrics_summary.add_argument("--contest-id", required=True)
+    interactive_metrics_summary.add_argument("--json", action="store_true")
+    interactive_metrics_summary.set_defaults(func=_cmd_interactive_metrics_summary)
+    interactive_metrics_compare = interactive_metrics_sub.add_parser("compare")
+    interactive_metrics_compare.add_argument("--before", required=True)
+    interactive_metrics_compare.add_argument("--after", required=True)
+    interactive_metrics_compare.add_argument("--json", action="store_true")
+    interactive_metrics_compare.set_defaults(func=_cmd_interactive_metrics_compare)
+    interactive_metrics_report = interactive_metrics_sub.add_parser("report")
+    interactive_metrics_report.add_argument("--contest-id", required=True)
+    interactive_metrics_report.add_argument("--output")
+    interactive_metrics_report.add_argument("--json", action="store_true")
+    interactive_metrics_report.set_defaults(func=_cmd_interactive_metrics_report)
 
     contest = sub.add_parser("contest")
     contest_sub = contest.add_subparsers(dest="contest_command", required=True)

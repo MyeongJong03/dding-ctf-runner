@@ -96,7 +96,10 @@ Monitor and stop:
 
 Supervisor files live under
 `~/.ctf-solver/runner-state/contests/<contest>/workers/` and store redacted
-commands/status, not raw auth values or raw flags.
+commands/status, not raw auth values. Local terminal output may include flags,
+solver output, and exploit output when needed for solving and verification, but
+do not commit, push, paste publicly, publish, or upload flags or auth material
+during an active contest.
 
 Manual legacy wrapper commands:
 

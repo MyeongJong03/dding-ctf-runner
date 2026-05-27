@@ -130,7 +130,14 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 
 ## 7. Do Not Leak
 
-Do not print or commit raw cookies, tokens, browser storage, auth headers, passwords, private keys, shell history, real flags, callback hits, downloaded private files, or writeups. Store submitted flags as hashes only.
+Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, cookies, tokens, sessions, browser storage, auth headers, passwords, private keys, callback hits, or downloaded private files. Store submitted flags as hashes in runner state.
+
+Record/update local metrics when comparing runner changes:
+
+```bash
+ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
+```
 
 ## 8. Legacy Background Workers
 

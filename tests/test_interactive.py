@@ -21,6 +21,23 @@ def test_interactive_init_creates_files_idempotently(tmp_path: Path, monkeypatch
         assert (root / name).exists()
     assert (root / "claims").is_dir()
     assert (root / "memos").is_dir()
+    assert (root / "metrics" / "events.jsonl").exists()
+    assert (root / "metrics" / "summary.json").exists()
+
+
+def test_interactive_prompt_allows_local_flag_output_and_bans_public_upload(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+
+    result = _run_json(["interactive", "prompt", "--contest-id", "demo", "--agent", "a1", "--json"])
+    prompt = result["prompt"]
+
+    assert "Local terminal output may include flags, solver output, and exploit output" in prompt
+    assert "Do not print raw secrets" not in prompt
+    assert "raw flag 출력 금지" not in prompt
+    assert "Do not publish or upload flags, writeups, exploits, tokens, cookies" in prompt
+    assert "public repositories" in prompt
+    assert "public pastes" in prompt
+    assert "Writeups are local-only during the contest and accepted-only" in prompt
 
 
 def test_interactive_init_lock_idempotent(tmp_path: Path, monkeypatch):

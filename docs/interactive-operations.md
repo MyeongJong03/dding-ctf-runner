@@ -150,8 +150,12 @@ Solvers should update memos whenever state changes:
 - `operator_notes`: sanitized user or teammate hints.
 
 This prevents context drift when a Codex session gets long or is resumed later.
-Do not put raw flags, cookies, tokens, browser storage, auth headers, private
-keys, shell history, or exploit transcripts with secrets into memos.
+Local terminal output may include flags, solver output, and exploit output when
+needed for solving and verification. Do not put cookies, tokens, sessions,
+browser storage, auth headers, private keys, auth material, or secret-bearing
+exploit transcripts into memos, and do not publish or upload flags, writeups,
+exploits, or auth material to public services, public repositories, public
+pastes, issue trackers, or external writeup locations during the contest.
 
 ## Writeup Policy
 
@@ -166,8 +170,36 @@ Accepted challenges produce exactly two local files:
 ```
 
 If a solver or exploit file exists, include the complete code in fenced markdown
-blocks. Do not include raw flags, auth material, private callback details, or
-unreviewed local runtime artifacts.
+blocks. Writeups are local-only during an active contest. Do not publish or
+upload flags, auth material, private callback details, or unreviewed local
+runtime artifacts during the contest.
+
+## Metrics
+
+`interactive init` creates local-only metrics files under the operator root:
+
+```text
+metrics/events.jsonl
+metrics/sessions.jsonl
+metrics/challenge_metrics.jsonl
+metrics/tool_benchmarks.jsonl
+metrics/summary.json
+metrics/regression_report.md
+```
+
+The claim, release, stalled, external-solved, submit, writeup, and cleanup
+commands record events where practical. Manual observations can be appended:
+
+```bash
+ctfctl interactive metrics record --contest-id "$CONTEST_ID" --agent agent-1 --event usage_observed --data-json '{"tokens_used": 1234}' --json
+ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics compare --before before-summary.json --after after-summary.json --json
+ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
+```
+
+The summary includes event counts, session count, claimed/solved/stalled/submit
+counts, accepted/writeup/cleanup counts, observed token totals when present, and
+average time to solve when claim and solve timestamps are available.
 
 ## Cleanup Policy
 

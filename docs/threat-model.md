@@ -3,12 +3,12 @@
 Primary risks:
 
 - Cookie, token, browser storage, or API key leakage.
-- Raw flag leakage in git, telemetry, stdout, screenshots, writeups, or shell history.
-- Interactive Codex terminal history or pasted prompts leaking raw secrets, auth headers, storage state, or raw flags.
-- Operator files under `~/CTF/contests/<contest>/operator/` accidentally storing raw secrets, raw flags, callback payloads, or private exploit transcripts.
-- Solver output mixing raw flags or raw secrets into summaries, handoffs, telemetry, or state.
+- Raw flag leakage through commits, pushes, public pastes, public repositories, public services, issue trackers, screenshots, public writeups, or telemetry.
+- Interactive Codex pasted prompts leaking raw secrets, auth headers, storage state, sessions, cookies, tokens, private keys, or flags to public locations.
+- Operator files under `~/CTF/contests/<contest>/operator/` accidentally storing raw secrets, callback payloads, or private exploit transcripts that later get published.
+- Solver output mixing raw flags or raw secrets into public summaries, handoffs, telemetry, or state.
 - Raw exploit transcript leakage through worker handoff files.
-- Writeup draft or skill candidate leakage through git, stdout, chat, or public issue trackers.
+- Writeup draft or skill candidate leakage through git, chat, public pastes, uploads, or public issue trackers.
 - Raw flag or exploit secret leakage through artifact archives.
 - Accidental live platform action during bootstrap or dry-run.
 - Accidental real challenge solve while the operator is only configuring an open event.
@@ -47,18 +47,20 @@ Controls:
 - Strong `.gitignore` for runtime, secret, flag, download, browser, callback, and writeup paths.
 - `redact_text` on CLI and telemetry output.
 - Local-only writeups and private artifacts.
+- Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
 - No public git push from runner workflows.
 - The default live workflow is interactive Codex swarm: operators run `ctfctl interactive ...`, then launch visible Codex sessions with `cd ~/CTF && codex`.
 - Every interactive Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
 - Windows WSL defaults to at most six Codex terminals; MacBook defaults to at most four.
 - Interactive `init` creates the operator directory when it is missing.
 - Interactive board state lives under `~/CTF/contests/<contest>/operator/`, outside this repo.
-- Operator files may contain `BOARD.md`, `board.json`, `solved.jsonl`, `external_solved.txt`, `stalled.jsonl`, `claims/`, and `memos/`, but must not contain raw cookies, tokens, auth headers, browser storage, passwords, private keys, shell history, or raw flags.
+- Operator files may contain `BOARD.md`, `board.json`, `solved.jsonl`, `external_solved.txt`, `stalled.jsonl`, `claims/`, `memos/`, and `metrics/`, but must not contain raw cookies, tokens, auth headers, browser storage, passwords, private keys, or shell history.
 - Same-machine interactive claims use local claim locks by default. `--allow-duplicate` is explicit and should be used only for intentional local duplicate solving. Cross-machine duplicate claims are out of scope and must be handled manually if the team cares.
 - Interactive self memos are limited to sanitized `memory`, `evidence`, `attempts`, `next_steps`, and `operator_notes`.
 - Stalled interactive challenges keep compact local handoffs only. They do not get writeups.
 - Interactive writeups are accepted-only and must be generated as Korean and English files named `[category]ChallengeNameWriteup.ko.md` and `[category]ChallengeNameWriteup.en.md`.
-- Solver or exploit code should be included completely in accepted writeups, but raw flags and secret-bearing runtime details remain redacted.
+- Solver or exploit code should be included completely in accepted writeups. Writeups are local-only during the contest and must not be published or uploaded externally until reviewed after the event.
+- Interactive metrics are local-only under `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`.
 - Background worker/supervisor/start-workers flows are legacy/advanced and should not be the normal live operation path.
 - Platform actions require `ctfctl` gates, `--live`, and `--confirm` where needed.
 - `ctfctl --mode setup|rehearsal|competition` separates setup, read-only rehearsal, and live competition execution. Setup blocks real challenge solve, live submit, instance start, browser login automation, and public tunnel exposure. Rehearsal permits real read-only ingest but blocks live submit and blocks real solve unless `--allow-real-solve-dry-run` is present. Competition requires `--confirm-competition`, an armed contest, and policy gates.

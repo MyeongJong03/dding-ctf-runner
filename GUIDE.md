@@ -249,7 +249,7 @@ ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind op
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind next_steps --append "Use the new hint to test <action>" --json
 ```
 
-Then paste the short sanitized note into the affected Codex terminal. Do not paste raw cookies, tokens, auth headers, browser storage, private keys, shell history, or raw flags.
+Then paste the short sanitized note into the affected Codex terminal. Local terminal output may include flags, solver output, and exploit output when needed for solving and verification, but do not paste cookies, tokens, sessions, browser storage, private keys, auth material, flags, writeups, or exploits into public chats, public pastes, issue trackers, public repositories, or external writeup locations during the contest.
 
 ## 8. Writeup Policy
 
@@ -261,6 +261,29 @@ Only write a writeup after an accepted solve is confirmed. For each accepted cha
 ```
 
 If solver or exploit code exists, include the complete code in fenced markdown blocks. Do not write a public-style writeup for unsolved, skipped, or stalled problems. For unsolved problems, leave only local `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records.
+
+## 8.1. Interactive Metrics
+
+Each operator root has local-only metrics files:
+
+```text
+metrics/events.jsonl
+metrics/sessions.jsonl
+metrics/challenge_metrics.jsonl
+metrics/tool_benchmarks.jsonl
+metrics/summary.json
+metrics/regression_report.md
+```
+
+Use `ctfctl interactive metrics record` for manual observations, including optional token usage:
+
+```bash
+ctfctl interactive metrics record --contest-id "$CONTEST_ID" --event usage_observed --data-json '{"tokens_used": 1234}' --json
+ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
+```
+
+Metrics are for local performance tracking across updates. They must not contain auth material or be copied into public repos during an active contest.
 
 ## 9. Callback, Docker, Submit, And Cleanup Helpers
 

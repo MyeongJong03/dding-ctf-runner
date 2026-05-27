@@ -2,7 +2,7 @@
 
 `dding-ctf-runner` is a shell-first control plane for live CTF operations. The default live workflow is an interactive Codex swarm: the operator prepares board state with `ctfctl`, then opens several visible Codex terminals from `~/CTF`. Every Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
 
-This repository is public-safe by design. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, and raw flags outside git.
+This repository is public-safe by design. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, exploits, and raw flags outside git and public services.
 
 ## What It Does
 
@@ -77,6 +77,8 @@ ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-
 ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
 ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
 ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
+ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 ```
 
 Writeups are accepted-only. Accepted challenges produce both Korean and English files named:
@@ -99,7 +101,9 @@ Keep runtime state outside this repo:
 ~/CTF/contests/
 ```
 
-Never print, commit, or copy raw cookies, tokens, auth headers, browser storage, passwords, private keys, shell history, real flags, downloaded private challenge files, callback hits, or generated writeups.
+Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, auth material, downloaded private challenge files, or callback hits to public services, public repositories, public pastes, issue trackers, or external writeup locations.
+
+Interactive metrics are stored under the operator root in `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`. These files are local runtime state and stay outside this repo.
 
 ## Legacy Background Workers
 

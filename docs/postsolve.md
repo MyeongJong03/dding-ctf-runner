@@ -55,13 +55,18 @@ Files:
 Existing files are preserved with `.bak.<timestamp>` names before a new
 canonical file is written.
 
-## Redaction
+## Active Contest Boundary
 
-Raw flags, cookies, tokens, auth headers, storage state, API keys, passwords,
-private keys, browser storage values, callback secrets, and shell history must
-not be written to postsolve files or printed by postsolve commands.
+Local terminal output may include flags, solver output, and exploit output when
+needed for solving and verification. Postsolve and writeup files remain
+local-only during an active contest. Do not commit, push, paste publicly,
+publish, or upload flags, writeups, exploits, cookies, tokens, sessions, storage
+state, API keys, passwords, private keys, auth material, callback secrets, or
+shell history to public services, public repositories, public pastes, issue
+trackers, or external writeup locations during the contest.
 
-Flags are represented as SHA-256 hashes or `[REDACTED_FLAG]` placeholders.
+Flags in runner-generated postsolve summaries are represented as SHA-256 hashes
+or placeholders.
 
 ## Archive
 

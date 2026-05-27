@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -19,6 +20,14 @@ from .submit import hash_flag, load_submit_policy, should_submit
 
 MEMO_KINDS = ("memory", "evidence", "attempts", "next_steps", "operator_notes")
 BOARD_FILES = ("BOARD.md", "board.json", "solved.jsonl", "external_solved.txt", "stalled.jsonl")
+METRICS_FILES = (
+    "events.jsonl",
+    "sessions.jsonl",
+    "challenge_metrics.jsonl",
+    "tool_benchmarks.jsonl",
+    "summary.json",
+    "regression_report.md",
+)
 SAFE_CLEANUP_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist", "tmp", "temp"}
 SAFE_CLEANUP_SUFFIXES = {".pyc", ".pyo", ".log", ".tmp", ".dump", ".dmp"}
 KEEP_NAMES = {
@@ -218,6 +227,7 @@ def claim_challenge(
     _write_board_md(root, board)
     challenge_dir = _challenge_path(contest_id, item)
     _ensure_challenge_memos(challenge_dir)
+    _record_metrics_event(root, contest_id=contest_id, event="claim", agent=agent, challenge_id=str(item.get("challenge_id") or ""), data={"status": "claimed"})
     return {
         "status": "claimed",
         "contest_id": contest_id,
@@ -247,6 +257,14 @@ def release_claim(contest_id: str, *, agent: str, challenge: str | None = None, 
                 item.pop("claimed_at", None)
     _write_board(root, board)
     _write_board_md(root, board)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="release",
+        agent=agent,
+        challenge_id=challenge,
+        data={"released_count": released, "reason": redact_text(reason)},
+    )
     return {"status": "ok", "contest_id": contest_id, "agent": agent, "released_count": released, "reason": redact_text(reason)}
 
 
@@ -275,6 +293,7 @@ def mark_stalled(contest_id: str, *, agent: str, challenge: str, reason: str) ->
     _release_locks(root, agent=agent, challenge=challenge)
     _write_board(root, board)
     _write_board_md(root, board)
+    _record_metrics_event(root, contest_id=contest_id, event="stalled", agent=agent, challenge_id=str(item.get("challenge_id") or challenge), data={"reason": event["reason"]})
     return {"status": "stalled", "event": event, "released": True, "notes_path": _display(challenge_dir / "operator_notes.md")}
 
 
@@ -293,6 +312,7 @@ def mark_external_solved(contest_id: str, *, challenge: str) -> dict[str, Any]:
     released = _release_locks(root, agent=None, challenge=challenge)
     _write_board(root, board)
     _write_board_md(root, board)
+    _record_metrics_event(root, contest_id=contest_id, event="external_solved", challenge_id=str(item.get("challenge_id") or challenge), data={"released_count": released})
     return {"status": "ok", "contest_id": contest_id, "challenge_id": item.get("challenge_id"), "released_count": released}
 
 
@@ -347,6 +367,13 @@ def submit_flag_file(contest_id: str, *, challenge_id: str, flag_file: str | Pat
         _release_locks(root, agent=None, challenge=str(item.get("challenge_id") or challenge_id))
         _write_board(root, board)
         _write_board_md(root, board)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="submit",
+        challenge_id=str(record["challenge_id"]),
+        data={"status": record["status"], "confidence": record.get("confidence"), "reason": record.get("reason")},
+    )
     return {
         "status": record["status"],
         "contest_id": contest_id,
@@ -405,6 +432,13 @@ def writeup_challenge(
         path = out_root / filename
         path.write_text(redact_text(text), encoding="utf-8")
         written[lang] = _display(path)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="writeup",
+        challenge_id=str(item.get("challenge_id") or challenge_id),
+        data={"languages": langs, "files": written, "included_code_count": len(code_blocks)},
+    )
     return {"status": "ok", "contest_id": contest_id, "challenge_id": item.get("challenge_id"), "files": written, "included_code_count": len(code_blocks)}
 
 
@@ -423,7 +457,92 @@ def cleanup_challenge(contest_id: str, *, challenge_id: str, safe: bool) -> dict
             else:
                 path.unlink(missing_ok=True)
             removed.append(_display(path))
+    _record_metrics_event(root, contest_id=contest_id, event="cleanup", challenge_id=challenge_id, data={"status": "ok" if safe else "planned", "removed_count": len(removed)})
     return {"status": "ok" if safe else "planned", "contest_id": contest_id, "challenge_id": challenge_id, "planned": [_display(path) for path in planned], "removed": removed}
+
+
+def metrics_record(
+    contest_id: str,
+    *,
+    event: str,
+    agent: str | None = None,
+    challenge_id: str | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    row = _record_metrics_event(root, contest_id=contest_id, event=event, agent=agent, challenge_id=challenge_id, data=data or {})
+    summary = metrics_summary(contest_id)
+    return {"status": "ok", "contest_id": contest_id, "event": row, "summary_path": summary["summary_path"]}
+
+
+def metrics_summary(contest_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    metrics_dir = _ensure_metrics_files(root)
+    events = _read_jsonl(metrics_dir / "events.jsonl")
+    sessions_rows = _read_jsonl(metrics_dir / "sessions.jsonl")
+    summary = _build_metrics_summary(contest_id, events, sessions_rows)
+    _write_json(metrics_dir / "summary.json", summary)
+    return {**summary, "status": "ok", "summary_path": _display(metrics_dir / "summary.json")}
+
+
+def metrics_compare(before: str | Path, after: str | Path) -> dict[str, Any]:
+    before_data = _read_json_file(Path(before).expanduser())
+    after_data = _read_json_file(Path(after).expanduser())
+    keys = [
+        "total_events",
+        "sessions",
+        "claimed_count",
+        "solved_count",
+        "stalled_count",
+        "submitted_count",
+        "accepted_count",
+        "writeup_ko_count",
+        "writeup_en_count",
+        "cleanup_count",
+        "tokens_total_observed",
+    ]
+    deltas: dict[str, Any] = {}
+    for key in keys:
+        before_value = before_data.get(key)
+        after_value = after_data.get(key)
+        if isinstance(before_value, (int, float)) and isinstance(after_value, (int, float)):
+            deltas[key] = after_value - before_value
+        elif before_value is None and isinstance(after_value, (int, float)):
+            deltas[key] = after_value
+        elif isinstance(before_value, (int, float)) and after_value is None:
+            deltas[key] = -before_value
+        else:
+            deltas[key] = None
+    return {"status": "ok", "before": _display(Path(before).expanduser()), "after": _display(Path(after).expanduser()), "deltas": deltas}
+
+
+def metrics_report(contest_id: str, *, output: str | Path | None = None) -> dict[str, Any]:
+    summary = metrics_summary(contest_id)
+    root = operator_root(contest_id)
+    metrics_dir = _ensure_metrics_files(root)
+    path = Path(output).expanduser() if output else metrics_dir / "regression_report.md"
+    lines = [
+        f"# Interactive Metrics Report: {contest_id}",
+        "",
+        f"- total_events: {summary['total_events']}",
+        f"- sessions: {summary['sessions']}",
+        f"- claimed_count: {summary['claimed_count']}",
+        f"- solved_count: {summary['solved_count']}",
+        f"- stalled_count: {summary['stalled_count']}",
+        f"- submitted_count: {summary['submitted_count']}",
+        f"- accepted_count: {summary['accepted_count']}",
+        f"- writeup_ko_count: {summary['writeup_ko_count']}",
+        f"- writeup_en_count: {summary['writeup_en_count']}",
+        f"- cleanup_count: {summary['cleanup_count']}",
+        f"- tokens_total_observed: {summary['tokens_total_observed']}",
+        f"- avg_time_to_solve_sec: {summary['avg_time_to_solve_sec']}",
+        "",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return {"status": "ok", "contest_id": contest_id, "report_path": _display(path), "summary": summary}
 
 
 def memo_update(contest_id: str, *, challenge_id: str, kind: str, append: str | None = None) -> dict[str, Any]:
@@ -451,7 +570,8 @@ Loop policy:
 - Do not solve one challenge and stop. Continue claim -> solve -> verify -> submit -> writeup -> cleanup -> next challenge until the contest ends, the user stops you, or no claimable work remains.
 - Do not split into controller/solver roles. This Codex session is the solver.
 - Keep user-facing progress compact unless the user asks for detail.
-- Do not print raw secrets, cookies, tokens, browser storage, private keys, shell history, or raw flags.
+- Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
+- Do not publish or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, or auth material to public services, public repositories, public pastes, issue trackers, or external writeup locations during the contest.
 
 Coordination:
 - Claim with: ctfctl interactive claim --contest-id {contest_id} --agent {agent} --json.
@@ -462,7 +582,7 @@ Coordination:
 Submission and writeups:
 - Submit only high-confidence candidates through ctfctl interactive submit with --confirm and a flag file.
 - If accepted, write Korean and English writeups with ctfctl interactive writeup --languages ko,en --include-code.
-- Writeups are accepted-only. Never write a challenge writeup for unsolved/stalled work.
+- Writeups are local-only during the contest and accepted-only. Never write a challenge writeup for unsolved/stalled work.
 - If solver/exploit code exists, include the complete code in the writeup.
 
 After each challenge:
@@ -527,6 +647,7 @@ def _ensure_operator_files(
             path.write_text(text, encoding="utf-8")
             created.append(filename)
         paths[filename] = path
+    paths["metrics"] = _ensure_metrics_files(root)
     return {"created": created, "preserved": preserved, "paths": paths}
 
 
@@ -777,6 +898,137 @@ def _writeup_paths(contest_id: str, item: Mapping[str, Any]) -> dict[str, str]:
         "ko": _display(writeups / f"[{_safe_filename(category)}]{_safe_filename(name)}Writeup.ko.md"),
         "en": _display(writeups / f"[{_safe_filename(category)}]{_safe_filename(name)}Writeup.en.md"),
     }
+
+
+def _ensure_metrics_files(root: Path) -> Path:
+    metrics_dir = root / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    for filename in METRICS_FILES:
+        path = metrics_dir / filename
+        if path.exists():
+            continue
+        if filename.endswith(".jsonl"):
+            path.write_text("", encoding="utf-8")
+        elif filename.endswith(".json"):
+            path.write_text("{}\n", encoding="utf-8")
+        else:
+            path.write_text("", encoding="utf-8")
+    return metrics_dir
+
+
+def _record_metrics_event(
+    root: Path,
+    *,
+    contest_id: str,
+    event: str,
+    agent: str | None = None,
+    challenge_id: str | None = None,
+    data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    metrics_dir = _ensure_metrics_files(root)
+    timestamp = utc_now()
+    row = {
+        "timestamp": timestamp,
+        "contest_id": contest_id,
+        "event": event,
+        "agent": agent,
+        "challenge_id": challenge_id,
+        "data": dict(data or {}),
+    }
+    _append_jsonl(metrics_dir / "events.jsonl", row)
+    if agent:
+        sessions = _read_jsonl(metrics_dir / "sessions.jsonl")
+        existing = next((item for item in sessions if item.get("contest_id") == contest_id and item.get("agent") == agent), None)
+        if existing is None:
+            _append_jsonl(metrics_dir / "sessions.jsonl", {"contest_id": contest_id, "agent": agent, "started_at": timestamp, "last_seen_at": timestamp})
+        else:
+            _append_jsonl(metrics_dir / "sessions.jsonl", {"contest_id": contest_id, "agent": agent, "started_at": existing.get("started_at"), "last_seen_at": timestamp})
+    if challenge_id:
+        _append_jsonl(metrics_dir / "challenge_metrics.jsonl", {"timestamp": timestamp, "contest_id": contest_id, "challenge_id": challenge_id, "event": event})
+    if event == "tool_benchmark":
+        _append_jsonl(metrics_dir / "tool_benchmarks.jsonl", row)
+    return row
+
+
+def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessions_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    contest_events = [row for row in events if row.get("contest_id") == contest_id]
+    sessions = {
+        str(row.get("agent"))
+        for row in sessions_rows
+        if row.get("contest_id") == contest_id and row.get("agent")
+    }
+    sessions.update(str(row.get("agent")) for row in contest_events if row.get("agent"))
+    tokens_total = 0
+    tokens_seen = False
+    claim_times: dict[str, datetime] = {}
+    solve_durations: list[float] = []
+    writeup_ko = 0
+    writeup_en = 0
+    accepted_count = 0
+    solved_count = 0
+    for row in contest_events:
+        event = str(row.get("event") or "")
+        data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
+        challenge_id = str(row.get("challenge_id") or "")
+        timestamp = _parse_timestamp(str(row.get("timestamp") or ""))
+        if event == "claim" and challenge_id and timestamp:
+            claim_times.setdefault(challenge_id, timestamp)
+        if event == "submit" and str(data.get("status") or "") == "accepted":
+            accepted_count += 1
+            solved_count += 1
+            if challenge_id and timestamp and challenge_id in claim_times:
+                solve_durations.append((timestamp - claim_times[challenge_id]).total_seconds())
+        elif event in {"accepted", "solved", "external_solved"}:
+            solved_count += 1
+            if event == "accepted":
+                accepted_count += 1
+            if challenge_id and timestamp and challenge_id in claim_times:
+                solve_durations.append((timestamp - claim_times[challenge_id]).total_seconds())
+        if event == "writeup":
+            languages = data.get("languages")
+            files = data.get("files")
+            if isinstance(languages, list):
+                writeup_ko += sum(1 for lang in languages if str(lang).lower().startswith("ko"))
+                writeup_en += sum(1 for lang in languages if str(lang).lower().startswith("en"))
+            elif isinstance(files, Mapping):
+                writeup_ko += 1 if "ko" in files else 0
+                writeup_en += 1 if "en" in files else 0
+        if event == "usage_observed":
+            tokens = data.get("tokens_used")
+            if isinstance(tokens, (int, float)):
+                tokens_total += int(tokens)
+                tokens_seen = True
+    return {
+        "contest_id": contest_id,
+        "generated_at": utc_now(),
+        "total_events": len(contest_events),
+        "sessions": len(sessions),
+        "claimed_count": sum(1 for row in contest_events if row.get("event") == "claim"),
+        "solved_count": solved_count,
+        "stalled_count": sum(1 for row in contest_events if row.get("event") == "stalled"),
+        "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit"),
+        "accepted_count": accepted_count,
+        "writeup_ko_count": writeup_ko,
+        "writeup_en_count": writeup_en,
+        "cleanup_count": sum(1 for row in contest_events if row.get("event") == "cleanup"),
+        "tokens_total_observed": tokens_total if tokens_seen else None,
+        "avg_time_to_solve_sec": round(sum(solve_durations) / len(solve_durations), 3) if solve_durations else None,
+    }
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _collect_code_blocks(challenge_dir: Path) -> list[dict[str, str]]:
