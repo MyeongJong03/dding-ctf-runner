@@ -67,14 +67,40 @@ Sync and board canonicalization:
 - `board.json` challenge rows include `canonical_id`, `canonical_name`, `aliases`, `artifact_sources`, `source_ids`, `is_static_shell`, `claimable`, and `solved_by_external`.
 - `interactive sync --json` and `interactive board --json` report `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
 
-Claim:
+Target planning and claim:
 
 ```bash
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --category web --dry-run --json
+ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
+ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge <id> --json
 ```
 
 Default claim returns only canonical rows where `claimable` is true. If a solver requests an alias or static slug with `--challenge`, the claim resolves to the canonical challenge and returns the canonical path/name.
+
+`interactive next` is the preferred solver entrypoint. It scores only canonical claimable rows by practical solve signal:
+
+- positive: local attachments or downloaded handout files, detected remote endpoints, confident category, previous memory/evidence/attempts/operator notes, and clear `next_steps`
+- retryable: stalled challenges with concrete `next_steps` when no fresh todo target remains
+- negative or excluded: static shell rows, alias/artifact-source rows, generic no-file statements, claimed rows unless `--allow-duplicate`, solved, and external-solved
+
+On success, `next` claims the selected challenge and returns `target_pack_path`. With `--dry-run`, it writes the pack and reports the target without creating a claim lock.
+
+`interactive target-pack` writes `operator/target-packs/<normalized>.md`. The pack includes:
+
+- canonical name, canonical ID, aliases, artifact sources, and source IDs
+- category guess and confidence
+- challenge path, brief path, raw/handout directories, extracted directories, and manifest paths
+- remote connection info detected from board metadata or brief text
+- top interesting files from ingest manifests or local artifact fallback
+- summaries and paths for `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`
+- recommended first commands, a short category playbook, wasted-time warnings, stall criteria, and writeup/cleanup reminders
+
+Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving; public upload, public writeup, public paste, and git push of flags or private artifacts remain forbidden during the contest.
+
+`interactive brief` prints a compact status view for a target. Use it when the operator asks "지금 뭐 하고 있음?" so a Codex can answer from local state and keep moving.
 
 Release:
 

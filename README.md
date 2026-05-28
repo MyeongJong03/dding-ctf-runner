@@ -74,7 +74,9 @@ Inside the same computer, duplicate claims are blocked by default on the canonic
 Each Codex terminal should keep going until the contest ends, the operator stops it, or there is no useful next work:
 
 ```bash
-ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
+ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind memory --append "short fact" --json
 ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
 ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
@@ -84,6 +86,10 @@ ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe
 ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 ```
+
+`interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps` raise priority; alias/static rows, generic no-file statements, solved, and externally solved challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
+
+`interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 
 When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, or alias:
 

@@ -58,6 +58,7 @@ from .handoff import read_handoffs
 from .ingest import brief_for_challenge, ingest_challenge, ingest_text_challenge, ingest_text_file, manifest_path, scan_path
 from .interactive import (
     board_status as interactive_board_status,
+    challenge_brief as interactive_challenge_brief,
     claim_challenge as interactive_claim_challenge,
     cleanup_challenge as interactive_cleanup_challenge,
     e2e_smoke as interactive_e2e_smoke,
@@ -73,11 +74,13 @@ from .interactive import (
     metrics_record as interactive_metrics_record,
     metrics_report as interactive_metrics_report,
     metrics_summary as interactive_metrics_summary,
+    next_challenge as interactive_next_challenge,
     release_claim as interactive_release_claim,
     solver_prompt as interactive_solver_prompt,
     submit_config as interactive_submit_config,
     submit_flag_file as interactive_submit_flag_file,
     sync_operator as interactive_sync_operator,
+    target_pack as interactive_target_pack,
     upload_submit as interactive_upload_submit,
     writeup_challenge as interactive_writeup_challenge,
 )
@@ -339,6 +342,43 @@ def _cmd_interactive_claim(args: argparse.Namespace) -> int:
     )
     _print_json(data)
     return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_next(args: argparse.Namespace) -> int:
+    data = interactive_next_challenge(
+        args.contest_id,
+        agent=args.agent,
+        category=args.category,
+        allow_duplicate=args.allow_duplicate,
+        dry_run=args.dry_run,
+    )
+    _print_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_target_pack(args: argparse.Namespace) -> int:
+    data = interactive_target_pack(args.contest_id, challenge_id=args.challenge_id, agent=args.agent)
+    if args.json:
+        _print_json(data)
+    else:
+        if data.get("status") == "ok":
+            path = Path(str(data.get("target_pack_path") or "").replace("~", str(Path.home()), 1))
+            print(redact_text(path.read_text(encoding="utf-8", errors="replace")))
+        else:
+            _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_brief(args: argparse.Namespace) -> int:
+    data = interactive_challenge_brief(args.contest_id, challenge_id=args.challenge_id)
+    if args.json:
+        _print_json(data)
+    else:
+        if data.get("status") == "ok":
+            print(redact_text(str(data.get("brief") or "")))
+        else:
+            _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
 
 
 def _cmd_interactive_release(args: argparse.Namespace) -> int:
@@ -2085,6 +2125,25 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_claim.add_argument("--allow-duplicate", action="store_true")
     interactive_claim.add_argument("--json", action="store_true")
     interactive_claim.set_defaults(func=_cmd_interactive_claim)
+    interactive_next = interactive_sub.add_parser("next")
+    interactive_next.add_argument("--contest-id", required=True)
+    interactive_next.add_argument("--agent", required=True)
+    interactive_next.add_argument("--category")
+    interactive_next.add_argument("--allow-duplicate", action="store_true")
+    interactive_next.add_argument("--dry-run", action="store_true")
+    interactive_next.add_argument("--json", action="store_true")
+    interactive_next.set_defaults(func=_cmd_interactive_next)
+    interactive_target_pack = interactive_sub.add_parser("target-pack")
+    interactive_target_pack.add_argument("--contest-id", required=True)
+    interactive_target_pack.add_argument("--challenge-id", required=True)
+    interactive_target_pack.add_argument("--agent")
+    interactive_target_pack.add_argument("--json", action="store_true")
+    interactive_target_pack.set_defaults(func=_cmd_interactive_target_pack)
+    interactive_brief = interactive_sub.add_parser("brief")
+    interactive_brief.add_argument("--contest-id", required=True)
+    interactive_brief.add_argument("--challenge-id", required=True)
+    interactive_brief.add_argument("--json", action="store_true")
+    interactive_brief.set_defaults(func=_cmd_interactive_brief)
     interactive_release = interactive_sub.add_parser("release")
     interactive_release.add_argument("--contest-id", required=True)
     interactive_release.add_argument("--agent", required=True)

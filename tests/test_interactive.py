@@ -40,6 +40,9 @@ def test_interactive_prompt_allows_local_flag_output_and_bans_public_upload(tmp_
     assert "public repositories" in prompt
     assert "public pastes" in prompt
     assert "Writeups are local-only during the contest and accepted-only" in prompt
+    assert "ctfctl interactive next" in prompt
+    assert "target_pack_path" in prompt
+    assert "ctfctl interactive target-pack" in prompt
 
 
 def test_interactive_init_lock_idempotent(tmp_path: Path, monkeypatch):
@@ -150,6 +153,166 @@ def test_claim_specific_alias_returns_canonical_and_duplicate_override_works(tmp
     assert duplicate["status"] == "blocked"
     assert allowed["status"] == "claimed"
     assert allowed["challenge_id"] == "my-favorite-instructions"
+
+
+def test_interactive_next_selects_canonical_not_alias_or_static(tmp_path: Path, monkeypatch):
+    _seed_target_planning_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "next", "--contest-id", "planning", "--agent", "a1", "--json"])
+
+    assert result["status"] == "claimed"
+    assert result["challenge_id"] == "real-target"
+    assert result["name"] == "Real Target"
+    assert "alias-target" not in result["target_pack_path"]
+    assert Path(result["target_pack_path"].replace("~", str(Path.home()), 1)).exists()
+
+
+def test_interactive_next_prefers_attachment_target_over_static_shell(tmp_path: Path, monkeypatch):
+    _seed_target_planning_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "next", "--contest-id", "planning", "--agent", "a1", "--dry-run", "--json"])
+
+    assert result["status"] == "planned"
+    assert result["challenge_id"] == "real-target"
+    assert "has_files_or_artifacts" in result["score_reasons"]
+
+
+def test_target_pack_includes_aliases_artifact_sources_and_memory(tmp_path: Path, monkeypatch):
+    _seed_target_planning_board(tmp_path, monkeypatch)
+    _run_json(
+        [
+            "interactive",
+            "memo",
+            "--contest-id",
+            "planning",
+            "--challenge-id",
+            "real-target",
+            "--kind",
+            "memory",
+            "--append",
+            "parsed config points at /api/check",
+            "--json",
+        ]
+    )
+    _run_json(
+        [
+            "interactive",
+            "memo",
+            "--contest-id",
+            "planning",
+            "--challenge-id",
+            "real-target",
+            "--kind",
+            "next_steps",
+            "--append",
+            "inspect app.py route validation",
+            "--json",
+        ]
+    )
+
+    result = _run_json(["interactive", "target-pack", "--contest-id", "planning", "--challenge-id", "alias-target", "--agent", "a1", "--json"])
+    text = Path(result["target_pack_path"].replace("~", str(Path.home()), 1)).read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert "canonical_name: Real Target" in text
+    assert "aliases: alias-target, Real Target Alias" in text
+    assert "artifact_sources: real-target-static" in text
+    assert "memory.md" in text
+    assert "parsed config points at /api/check" in text
+    assert "inspect app.py route validation" in text
+
+
+def test_target_pack_includes_category_specific_first_commands(tmp_path: Path, monkeypatch):
+    _seed_pwn_target_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "target-pack", "--contest-id", "pwn-plan", "--challenge-id", "overflow", "--agent", "a1", "--json"])
+    text = Path(result["target_pack_path"].replace("~", str(Path.home()), 1)).read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert "- category: pwn" in text
+    assert "checksec" in text
+    assert "pwntools ok" in text
+
+
+def test_target_pack_redacts_synthetic_token_session_markers(tmp_path: Path, monkeypatch):
+    _seed_target_planning_board(tmp_path, monkeypatch)
+    marker = "TOKEN_SYNTHETIC_SESSION_MARKER"
+    _run_json(
+        [
+            "interactive",
+            "memo",
+            "--contest-id",
+            "planning",
+            "--challenge-id",
+            "real-target",
+            "--kind",
+            "operator_notes",
+            "--append",
+            f"debug note {marker} session=raw-session cookie=raw-cookie",
+            "--json",
+        ]
+    )
+
+    result = _run_json(["interactive", "target-pack", "--contest-id", "planning", "--challenge-id", "real-target", "--json"])
+    text = Path(result["target_pack_path"].replace("~", str(Path.home()), 1)).read_text(encoding="utf-8")
+
+    assert marker not in text
+    assert "raw-session" not in text
+    assert "raw-cookie" not in text
+    assert "[REDACTED]" in text
+
+
+def test_interactive_brief_outputs_compact_target_state(tmp_path: Path, monkeypatch):
+    _seed_target_planning_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "brief", "--contest-id", "planning", "--challenge-id", "real-target", "--json"])
+
+    assert result["status"] == "ok"
+    assert "# Brief: Real Target" in result["brief"]
+    assert "artifact_sources:" in result["brief"]
+    assert "top_files:" in result["brief"]
+
+
+def test_interactive_next_can_retry_stalled_with_clear_next_steps_when_no_fresh_todo(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    _run_json(["interactive", "claim", "--contest-id", "demo", "--agent", "a1", "--json"])
+    _run_json(
+        [
+            "interactive",
+            "memo",
+            "--contest-id",
+            "demo",
+            "--challenge-id",
+            "Birdhouse",
+            "--kind",
+            "next_steps",
+            "--append",
+            "test the extracted hint parser",
+            "--json",
+        ]
+    )
+    _run_json(
+        [
+            "interactive",
+            "stalled",
+            "--contest-id",
+            "demo",
+            "--agent",
+            "a1",
+            "--challenge",
+            "Birdhouse",
+            "--reason",
+            "need to test extracted hint parser",
+            "--json",
+        ]
+    )
+
+    result = _run_json(["interactive", "next", "--contest-id", "demo", "--agent", "a2", "--json"])
+
+    assert result["status"] == "claimed"
+    assert result["challenge_id"] == "birdhouse"
+    assert result["selected_status"] == "stalled"
+    assert "clear_next_steps" in result["score_reasons"]
 
 
 def test_external_solved_alias_marks_canonical_and_releases_alias_locks(tmp_path: Path, monkeypatch):
@@ -746,6 +909,130 @@ def _seed_board(tmp_path: Path, monkeypatch, profile: Path | None = None) -> Non
                         "status": "todo",
                         "priority": 100,
                         "path": str(tmp_path / "contests" / "demo" / "misc" / "Birdhouse"),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_target_planning_board(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    _run_json(["interactive", "init", "--contest-id", "planning", "--json"])
+    root = tmp_path / "contests" / "planning"
+    challenge = root / "web" / "Real_Target"
+    raw = challenge / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "app.py").write_text("from flask import Flask\napp = Flask(__name__)\n@app.route('/api/check')\ndef check(): pass\n", encoding="utf-8")
+    (challenge / "brief.md").write_text("# Brief\nRemote: nc real.example 31337\n", encoding="utf-8")
+    board = root / "operator" / "board.json"
+    board.write_text(
+        json.dumps(
+            {
+                "contest_id": "planning",
+                "challenges": [
+                    {
+                        "challenge_id": "alias-target",
+                        "canonical_id": "real-target",
+                        "canonical_name": "Real Target",
+                        "name": "Real Target Alias",
+                        "category": "web",
+                        "status": "todo",
+                        "priority": 1,
+                        "is_alias": True,
+                        "claimable": True,
+                        "has_files": True,
+                    },
+                    {
+                        "challenge_id": "real-target-static",
+                        "canonical_id": "real-target",
+                        "canonical_name": "Real Target",
+                        "name": "real-target-static",
+                        "category": "web",
+                        "status": "skipped",
+                        "priority": 1,
+                        "is_static_shell": True,
+                        "is_static_alias": True,
+                        "claimable": False,
+                    },
+                    {
+                        "challenge_id": "artifact-row",
+                        "canonical_id": "real-target",
+                        "canonical_name": "Real Target",
+                        "name": "artifact-row",
+                        "category": "web",
+                        "status": "todo",
+                        "priority": 0,
+                        "is_artifact_source": True,
+                        "claimable": True,
+                        "has_files": True,
+                    },
+                    {
+                        "challenge_id": "text-only",
+                        "name": "Text Only",
+                        "canonical_id": "text-only",
+                        "canonical_name": "Text Only",
+                        "category": "misc",
+                        "statement": "DEF CON CTF Quals 2026",
+                        "status": "todo",
+                        "priority": 1,
+                        "has_files": False,
+                        "file_count": 0,
+                        "claimable": True,
+                    },
+                    {
+                        "challenge_id": "real-target",
+                        "name": "Real Target",
+                        "canonical_id": "real-target",
+                        "canonical_name": "Real Target",
+                        "category": "web",
+                        "statement": "Real challenge with a Flask route and nc real.example 31337.",
+                        "status": "todo",
+                        "priority": 100,
+                        "has_files": True,
+                        "file_count": 1,
+                        "claimable": True,
+                        "path": str(challenge),
+                        "aliases": ["alias-target", "Real Target Alias"],
+                        "artifact_sources": ["real-target-static"],
+                        "source_ids": ["real-target", "alias-target", "real-target-static"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_pwn_target_board(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    _run_json(["interactive", "init", "--contest-id", "pwn-plan", "--json"])
+    root = tmp_path / "contests" / "pwn-plan"
+    challenge = root / "pwn" / "Overflow"
+    raw = challenge / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "chall").write_bytes(b"\x7fELF\x02\x01\x01\x00overflow")
+    (challenge / "brief.md").write_text("# Brief\npwn service: nc pwn.example 4444\n", encoding="utf-8")
+    board = root / "operator" / "board.json"
+    board.write_text(
+        json.dumps(
+            {
+                "contest_id": "pwn-plan",
+                "challenges": [
+                    {
+                        "challenge_id": "overflow",
+                        "name": "Overflow",
+                        "canonical_id": "overflow",
+                        "canonical_name": "Overflow",
+                        "category": "pwn",
+                        "statement": "Exploit the service at nc pwn.example 4444.",
+                        "status": "todo",
+                        "priority": 100,
+                        "has_files": True,
+                        "file_count": 1,
+                        "claimable": True,
+                        "path": str(challenge),
                     }
                 ],
             }

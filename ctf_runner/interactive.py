@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from typing import Any, Iterable, Mapping
 
 from .auth import load_auth_secret, load_config_metadata
 from .fake_ctfd import FakeCTFdServer, default_correct_flag, platform_config
+from .file_manifest import is_sensitive_path
 from .ingest import ingest_challenge, ingest_text_challenge
 from .paths import get_paths
 from .platform_base import action_to_dict
@@ -49,6 +51,7 @@ KEEP_NAMES = {
     "exploit.py",
     "README.md",
 }
+PLAYBOOK_CATEGORIES = ("web", "pwn", "rev", "crypto", "forensics/misc", "osint", "ai/ml")
 
 
 def init_operator(
@@ -238,18 +241,18 @@ def claim_challenge(
     agent: str,
     challenge: str | None = None,
     allow_duplicate: bool = False,
+    allow_stalled_retry: bool = False,
 ) -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
     board = _read_board(root, contest_id)
     _apply_runtime_statuses(root, board)
     if challenge:
-        wanted = _normalize(challenge)
-        item = next((row for row in board.get("challenges", []) if wanted in _challenge_keys(row)), None)
+        item = _find_challenge(board, challenge)
         if item is None:
             return {"status": "empty", "contest_id": contest_id, "reason": "challenge_not_found"}
         status = _challenge_status(root, item)
-        if status in {"solved", "stalled", "skipped"}:
+        if status in {"solved", "skipped"} or (status == "stalled" and not allow_stalled_retry):
             return {"status": "empty", "contest_id": contest_id, "reason": f"challenge_{status}", "challenge_id": item.get("challenge_id")}
         if not _claimable_source(item):
             return {"status": "empty", "contest_id": contest_id, "reason": "challenge_not_claimable", "challenge_id": item.get("challenge_id")}
@@ -290,6 +293,110 @@ def claim_challenge(
         "lock_path": _display(lock_path),
         "notes_paths": {kind: _display(challenge_dir / f"{kind}.md") for kind in MEMO_KINDS},
         "writeup_paths": _writeup_paths(contest_id, item),
+    }
+
+
+def next_challenge(
+    contest_id: str,
+    *,
+    agent: str,
+    category: str | None = None,
+    allow_duplicate: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    ranked = _rank_next_targets(root, contest_id, board, category=category, allow_duplicate=allow_duplicate)
+    if not ranked:
+        return {
+            "status": "empty",
+            "contest_id": contest_id,
+            "agent": agent,
+            "reason": "no_ranked_target",
+            "category": category or "",
+        }
+
+    selected = ranked[0]
+    item = selected["item"]
+    challenge_id = str(item.get("challenge_id") or item.get("canonical_id") or item.get("name") or "")
+    pack = target_pack(contest_id, challenge_id=challenge_id, agent=agent)
+    common = {
+        "contest_id": contest_id,
+        "agent": agent,
+        "challenge_id": challenge_id,
+        "name": item.get("name"),
+        "category": item.get("category", ""),
+        "score": selected["score"],
+        "score_reasons": selected["reasons"],
+        "target_pack_path": pack.get("target_pack_path", ""),
+        "ranked_considered": len(ranked),
+        "selected_status": selected["status"],
+    }
+    if dry_run:
+        return {"status": "planned", **common, "claim": {"status": "dry_run"}}
+
+    claim = claim_challenge(
+        contest_id,
+        agent=agent,
+        challenge=challenge_id,
+        allow_duplicate=allow_duplicate,
+        allow_stalled_retry=selected["status"] == "stalled",
+    )
+    if claim.get("status") == "claimed":
+        pack = target_pack(contest_id, challenge_id=challenge_id, agent=agent)
+        common["target_pack_path"] = pack.get("target_pack_path", "")
+    return {**common, **{key: value for key, value in claim.items() if key not in common}, "claim": claim}
+
+
+def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+
+    context = _target_context(contest_id, root, item)
+    pack_path = root / "target-packs" / f"{_safe_slug(str(item.get('canonical_id') or item.get('challenge_id') or challenge_id))}.md"
+    text = _render_target_pack(contest_id, item, context, agent=agent)
+    pack_path.parent.mkdir(parents=True, exist_ok=True)
+    pack_path.write_text(_target_safe_text(text), encoding="utf-8")
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": item.get("challenge_id"),
+        "canonical_name": item.get("canonical_name") or item.get("name"),
+        "agent": agent or "",
+        "category": context["category_guess"]["category"],
+        "category_confidence": context["category_guess"]["confidence"],
+        "target_pack_path": _display(pack_path),
+        "brief_path": _display(context["brief_path"]) if context.get("brief_path") else "",
+        "challenge_path": _display(context["challenge_dir"]),
+        "remote_endpoint_count": len(context["remote_endpoints"]),
+    }
+
+
+def challenge_brief(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    context = _target_context(contest_id, root, item)
+    text = _render_compact_brief(contest_id, item, context)
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": item.get("challenge_id"),
+        "canonical_name": item.get("canonical_name") or item.get("name"),
+        "category": context["category_guess"]["category"],
+        "brief": _target_safe_text(text),
+        "target_pack_path": _display(root / "target-packs" / f"{_safe_slug(str(item.get('canonical_id') or item.get('challenge_id') or challenge_id))}.md"),
     }
 
 
@@ -948,6 +1055,9 @@ def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None =
             "metrics_compare_public": True,
             "submit_config": True,
             "upload_submit": True,
+            "next": True,
+            "target_pack": True,
+            "brief": True,
         },
         "prompt_policy_summary": {
             "local_raw_flag_output_allowed": True,
@@ -1136,16 +1246,19 @@ def solver_prompt(contest_id: str, *, agent: str) -> dict[str, Any]:
 Work from ~/CTF. Use ctfctl interactive commands as your coordination surface.
 
 Loop policy:
-- Do not solve one challenge and stop. Continue claim -> solve -> verify -> submit -> writeup -> cleanup -> next challenge until the contest ends, the user stops you, or no claimable work remains.
+- Do not solve one challenge and stop. Continue next/claim -> read target pack -> solve -> verify -> submit -> writeup -> cleanup -> next challenge until the contest ends, the user stops you, or no useful work remains.
 - Do not split into controller/solver roles. This Codex session is the solver.
 - Keep user-facing progress compact unless the user asks for detail.
 - Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
 - Do not publish or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, or auth material to public services, public repositories, public pastes, issue trackers, or external writeup locations during the contest.
+- If the user asks what you are doing, answer from ctfctl interactive brief or the current target pack without stopping the loop.
 
 Coordination:
-- Claim with: ctfctl interactive claim --contest-id {contest_id} --agent {agent} --json.
+- Prefer target selection with: ctfctl interactive next --contest-id {contest_id} --agent {agent} --json.
+- The next result includes target_pack_path. Read that file before opening random files or trying payloads.
+- If you manually claim with ctfctl interactive claim, immediately run ctfctl interactive target-pack --contest-id {contest_id} --challenge-id <id> --agent {agent} --json and read target_pack_path.
 - Same-machine duplicate claims are blocked by default. Use --allow-duplicate only when the user explicitly wants duplicate solving.
-- If stuck, update self memos and run ctfctl interactive stalled with a compact reason.
+- If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then run ctfctl interactive next again.
 - Maintain memory.md, evidence.md, attempts.md, next_steps.md, and operator_notes.md for each challenge using ctfctl interactive memo.
 
 Submission and writeups:
@@ -1252,6 +1365,8 @@ def _write_board_md(root: Path, board: Mapping[str, Any]) -> None:
             notes.append("static shell")
         if item.get("is_static_alias"):
             notes.append("static alias")
+        if item.get("is_artifact_source") or item.get("artifact_source"):
+            notes.append("artifact source")
         if item.get("is_alias"):
             notes.append(f"alias of {item.get('canonical_id')}")
         aliases = _list_values(item.get("aliases"))
@@ -2033,10 +2148,10 @@ def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
         elif item.get("platform_solved"):
             item["status"] = "external_solved"
             item["solved_by_external"] = True
-        elif keys & stalled:
-            item["status"] = "stalled"
         elif keys & claimed:
             item["status"] = "claimed"
+        elif keys & stalled:
+            item["status"] = "stalled"
         elif not _claimable_source(item):
             item["status"] = "skipped"
         elif item.get("status") in {"solved", "external_solved", "stalled", "claimed", "skipped"}:
@@ -2046,7 +2161,7 @@ def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
 
 
 def _claimable_source(item: Mapping[str, Any]) -> bool:
-    if item.get("is_alias") or item.get("is_static_alias") or item.get("is_static_shell"):
+    if item.get("is_alias") or item.get("is_static_alias") or item.get("is_static_shell") or item.get("is_artifact_source") or item.get("artifact_source"):
         return False
     return bool(item.get("claimable", True))
 
@@ -2126,10 +2241,34 @@ def _release_locks_for_item(root: Path, *, agent: str | None, item: Mapping[str,
 
 def _find_challenge(board: Mapping[str, Any], challenge: str) -> dict[str, Any] | None:
     wanted = _normalize(challenge)
+    matches: list[dict[str, Any]] = []
     for item in board.get("challenges", []):
         if wanted in _challenge_keys(item):
-            return item
-    return None
+            matches.append(item)
+    if not matches:
+        return None
+    return max(matches, key=lambda item: _challenge_resolution_score(item, wanted))
+
+
+def _challenge_resolution_score(item: Mapping[str, Any], wanted: str) -> tuple[int, int, int, str]:
+    score = 0
+    if _claimable_source(item):
+        score += 1000
+    if not item.get("is_alias") and not item.get("is_static_alias") and not item.get("is_static_shell"):
+        score += 200
+    if _normalize(str(item.get("challenge_id") or "")) == wanted:
+        score += 40
+    if _normalize(str(item.get("canonical_id") or "")) == wanted:
+        score += 35
+    if _normalize(str(item.get("canonical_name") or "")) == wanted:
+        score += 25
+    if _normalize(str(item.get("name") or "")) == wanted:
+        score += 20
+    if wanted in {_normalize(str(value)) for value in _list_values(item.get("aliases"))}:
+        score += 15
+    if wanted in {_normalize(str(value)) for value in _list_values(item.get("artifact_sources"))}:
+        score += 10
+    return (score, int(not item.get("is_alias")), int(not item.get("is_static_shell")), str(item.get("name") or ""))
 
 
 def _challenge_keys(item: Mapping[str, Any]) -> set[str]:
@@ -2182,6 +2321,744 @@ def _challenge_path(contest_id: str, item: Mapping[str, Any]) -> Path:
     category = _safe_slug(str(item.get("category") or "misc"))
     name = _safe_slug(str(item.get("name") or item.get("challenge_id") or "challenge"))
     return get_paths().contests_root / _safe_slug(contest_id) / category / name
+
+
+def _rank_next_targets(
+    root: Path,
+    contest_id: str,
+    board: Mapping[str, Any],
+    *,
+    category: str | None,
+    allow_duplicate: bool,
+) -> list[dict[str, Any]]:
+    fresh: list[tuple[dict[str, Any], str]] = []
+    retry_stalled: list[tuple[dict[str, Any], str]] = []
+    duplicate_claimed: list[tuple[dict[str, Any], str]] = []
+    for raw_item in board.get("challenges", []):
+        if not isinstance(raw_item, dict):
+            continue
+        item = raw_item
+        if not _claimable_source(item):
+            continue
+        if category and not _target_category_matches(contest_id, root, item, category):
+            continue
+        status = _challenge_status(root, item)
+        if status == "todo":
+            fresh.append((item, status))
+        elif status == "stalled" and _stalled_has_clear_next_step(contest_id, item):
+            retry_stalled.append((item, status))
+        elif status == "claimed" and allow_duplicate:
+            duplicate_claimed.append((item, status))
+
+    selected_pool = fresh or retry_stalled or duplicate_claimed
+    ranked: list[dict[str, Any]] = []
+    for item, status in selected_pool:
+        score, reasons = _target_score(root, contest_id, item, status=status)
+        ranked.append({"item": item, "status": status, "score": score, "reasons": reasons})
+    return sorted(
+        ranked,
+        key=lambda row: (
+            -int(row["score"]),
+            int(row["item"].get("priority") or 100),
+            str(row["item"].get("name") or row["item"].get("challenge_id") or ""),
+        ),
+    )
+
+
+def _target_category_matches(contest_id: str, root: Path, item: Mapping[str, Any], wanted: str) -> bool:
+    wanted_norm = _normalize(wanted)
+    if not wanted_norm:
+        return True
+    declared = str(item.get("category") or "")
+    values = {
+        _normalize(declared),
+        _normalize(_playbook_category(declared, has_remote=False)),
+    }
+    guess = _category_guess(item, _candidate_challenge_dirs(contest_id, item))
+    values.add(_normalize(str(guess.get("category") or "")))
+    values.add(_normalize(str(guess.get("declared") or "")))
+    return wanted_norm in values
+
+
+def _target_score(root: Path, contest_id: str, item: Mapping[str, Any], *, status: str) -> tuple[int, list[str]]:
+    context = _target_context(contest_id, root, item)
+    score = 0
+    reasons: list[str] = []
+    priority = _int_value(item.get("priority"))
+    if priority is not None:
+        priority_bonus = max(0, 150 - min(priority, 150)) // 5
+        if priority_bonus:
+            score += priority_bonus
+            reasons.append(f"priority_bonus={priority_bonus}")
+
+    if _target_has_files(item, context):
+        score += 40
+        reasons.append("has_files_or_artifacts")
+    if context["remote_endpoints"]:
+        score += 25
+        reasons.append("remote_endpoint")
+
+    category_guess = context["category_guess"]
+    confidence = int(category_guess.get("confidence") or 0)
+    if confidence >= 75:
+        score += 15
+        reasons.append("high_category_confidence")
+    elif category_guess.get("category"):
+        score += 8
+        reasons.append("category_known")
+
+    progress_kinds = _memo_progress_kinds(context["memo_summaries"])
+    if progress_kinds:
+        score += 18
+        reasons.append("previous_progress=" + ",".join(progress_kinds[:4]))
+    if context["memo_summaries"].get("next_steps", {}).get("has_content"):
+        score += 14
+        reasons.append("clear_next_steps")
+
+    if status == "stalled":
+        score += 10
+        reasons.append("stalled_retryable")
+    elif status == "claimed":
+        score -= 20
+        reasons.append("duplicate_claim")
+
+    if item.get("is_static_shell") or item.get("is_static_alias") or item.get("is_alias"):
+        score -= 1000
+        reasons.append("static_or_alias_penalty")
+    if _generic_low_information_target(item, context):
+        score -= 25
+        reasons.append("low_information_no_files")
+    if _challenge_status(root, item) == "solved":
+        score -= 1000
+        reasons.append("already_solved")
+    return score, reasons
+
+
+def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dict[str, Any]:
+    challenge_dir = _challenge_workdir(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    candidate_dirs = _candidate_challenge_dirs(contest_id, item, challenge_dir=challenge_dir)
+    brief_path = _locate_brief_path(item, candidate_dirs)
+    raw_dirs = _existing_named_dirs(candidate_dirs, ("raw", "handout"))
+    extracted_dirs = _existing_named_dirs(candidate_dirs, ("extracted",))
+    manifest_paths = _existing_named_files(candidate_dirs, ("manifest/manifest.json",))
+    scan_paths = _existing_named_files(candidate_dirs, ("manifest/scan.json",))
+    memo_summaries = _memo_summaries(challenge_dir)
+    remote_endpoints = _remote_endpoints(item, brief_path=brief_path)
+    category_guess = _category_guess(item, candidate_dirs, scan_paths=scan_paths, has_remote=bool(remote_endpoints))
+    top_files = _top_interesting_files(candidate_dirs, manifest_paths=manifest_paths, scan_paths=scan_paths)
+    return {
+        "operator_root": root,
+        "challenge_dir": challenge_dir,
+        "candidate_dirs": candidate_dirs,
+        "brief_path": brief_path,
+        "raw_dirs": raw_dirs,
+        "extracted_dirs": extracted_dirs,
+        "manifest_paths": manifest_paths,
+        "scan_paths": scan_paths,
+        "memo_summaries": memo_summaries,
+        "remote_endpoints": remote_endpoints,
+        "category_guess": category_guess,
+        "top_files": top_files,
+    }
+
+
+def _challenge_workdir(contest_id: str, item: Mapping[str, Any]) -> Path:
+    raw_path = str(item.get("path") or "").strip()
+    if raw_path:
+        return _expand_display_path(raw_path)
+    return _challenge_path(contest_id, item)
+
+
+def _candidate_challenge_dirs(contest_id: str, item: Mapping[str, Any], *, challenge_dir: Path | None = None) -> list[Path]:
+    contest_root = get_paths().contests_root / _safe_slug(contest_id)
+    raw_values = [
+        challenge_dir or _challenge_workdir(contest_id, item),
+        _challenge_path(contest_id, item),
+        contest_root / _safe_slug(str(item.get("challenge_id") or "")),
+        contest_root / _safe_slug(str(item.get("canonical_id") or "")),
+        contest_root / _safe_slug(str(item.get("canonical_name") or "")),
+    ]
+    result: list[Path] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        path = Path(value).expanduser()
+        key = path.resolve().as_posix() if path.exists() else path.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def _locate_brief_path(item: Mapping[str, Any], candidate_dirs: Iterable[Path]) -> Path | None:
+    raw = str(item.get("brief_path") or "").strip()
+    if raw:
+        path = _expand_display_path(raw)
+        if path.exists() and path.is_file():
+            return path
+    for base in candidate_dirs:
+        path = base / "brief.md"
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _existing_named_dirs(candidate_dirs: Iterable[Path], names: tuple[str, ...]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for base in candidate_dirs:
+        for name in names:
+            path = base / name
+            if not path.exists() or not path.is_dir():
+                continue
+            key = path.resolve().as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def _existing_named_files(candidate_dirs: Iterable[Path], names: tuple[str, ...]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for base in candidate_dirs:
+        for name in names:
+            path = base / name
+            if not path.exists() or not path.is_file():
+                continue
+            key = path.resolve().as_posix()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def _memo_summaries(challenge_dir: Path) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for kind in MEMO_KINDS:
+        path = challenge_dir / f"{kind}.md"
+        text = _read_target_text(path, 5000)
+        content = _memo_content(text, kind)
+        summaries[kind] = {
+            "path": _display(path),
+            "has_content": bool(content),
+            "summary": _target_summary(content, 700),
+        }
+    return summaries
+
+
+def _memo_content(text: str, kind: str) -> str:
+    title = kind.replace("_", " ").title()
+    lines = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == f"# {title}":
+            continue
+        lines.append(stripped)
+    return "\n".join(lines).strip()
+
+
+def _memo_progress_kinds(memos: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    result: list[str] = []
+    for kind in ("memory", "evidence", "attempts", "operator_notes", "next_steps"):
+        if memos.get(kind, {}).get("has_content"):
+            result.append(kind)
+    return result
+
+
+def _stalled_has_clear_next_step(contest_id: str, item: Mapping[str, Any]) -> bool:
+    challenge_dir = _challenge_workdir(contest_id, item)
+    next_steps = _memo_content(_read_target_text(challenge_dir / "next_steps.md", 4000), "next_steps")
+    if next_steps and len(next_steps.split()) >= 3:
+        return True
+    reason = str(item.get("stalled_reason") or "").strip().lower()
+    return bool(reason and any(token in reason for token in ("next", "try", "todo", "need", "check", "inspect", "test")))
+
+
+def _target_has_files(item: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    if bool(item.get("has_files")) or int(item.get("attachment_count") or item.get("file_count") or 0) > 0:
+        return True
+    for key in ("raw_dirs", "extracted_dirs"):
+        for path in context.get(key) or []:
+            if _dir_has_files(Path(path)):
+                return True
+    return bool(context.get("top_files"))
+
+
+def _generic_low_information_target(item: Mapping[str, Any], context: Mapping[str, Any]) -> bool:
+    if _target_has_files(item, context) or context.get("remote_endpoints"):
+        return False
+    statement = re.sub(r"\s+", " ", str(item.get("statement") or "")).strip().lower()
+    if not statement:
+        return True
+    generic_titles = {"def con ctf quals 2026", "defcon ctf quals 2026", "def con ctf quals", "defcon ctf quals"}
+    return statement in generic_titles or len(statement) < 80
+
+
+def _remote_endpoints(item: Mapping[str, Any], *, brief_path: Path | None) -> list[str]:
+    texts: list[str] = []
+    for key in ("statement", "connection_info", "remote", "url"):
+        value = item.get(key)
+        if value:
+            texts.append(str(value))
+    for value in _list_values(item.get("links")):
+        texts.append(str(value))
+    for key in ("submit_metadata", "platform_submission", "platform_submit", "submit"):
+        raw = item.get(key)
+        if isinstance(raw, Mapping):
+            for subkey in ("endpoint", "status_url", "connection_info", "remote", "url"):
+                if raw.get(subkey):
+                    texts.append(str(raw[subkey]))
+    if brief_path:
+        texts.append(_read_target_text(brief_path, 8000))
+
+    endpoints: list[str] = []
+    for text in texts:
+        safe = _target_safe_text(text)
+        endpoints.extend(match.group(0).rstrip(").,]") for match in re.finditer(r"https?://[^\s'\"<>]+", safe))
+        for match in re.finditer(r"(?i)\b(?:nc|ncat|netcat)\s+([A-Za-z0-9_.-]+)\s+([0-9]{2,5})", safe):
+            endpoints.append(f"nc {match.group(1)} {match.group(2)}")
+        for match in re.finditer(r"\b((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost|127(?:\.\d{1,3}){3}):([0-9]{2,5})\b", safe):
+            endpoints.append(f"{match.group(1)}:{match.group(2)}")
+    return _dedupe_strings(endpoints)[:12]
+
+
+def _category_guess(
+    item: Mapping[str, Any],
+    candidate_dirs: Iterable[Path],
+    *,
+    scan_paths: Iterable[Path] | None = None,
+    has_remote: bool = False,
+) -> dict[str, Any]:
+    declared = str(item.get("category") or "").strip()
+    category = _playbook_category(declared, has_remote=has_remote)
+    confidence = 75 if declared else 0
+    sources = [f"declared:{declared}"] if declared else []
+    paths = list(scan_paths or _existing_named_files(candidate_dirs, ("manifest/scan.json",)))
+    for path in paths:
+        scan = _read_json_file(path)
+        likely = scan.get("likely_categories") if isinstance(scan.get("likely_categories"), list) else []
+        if not likely:
+            continue
+        top = likely[0]
+        inferred_raw = str(top.get("category") or "")
+        inferred = _playbook_category(inferred_raw, has_remote=has_remote)
+        inferred_score = int(top.get("score") or 0)
+        sources.append(f"inferred:{inferred_raw}:{inferred_score}")
+        inferred_confidence = min(95, 50 + inferred_score * 5)
+        if not category:
+            category = inferred
+            confidence = max(confidence, inferred_confidence)
+        elif inferred == category:
+            confidence = max(confidence, min(95, confidence + 15, inferred_confidence + 10))
+        else:
+            confidence = max(confidence, 65 if declared else inferred_confidence)
+    if not category:
+        category = "forensics/misc"
+        confidence = 35
+        sources.append("fallback:forensics/misc")
+    return {"category": category, "declared": declared, "confidence": confidence, "sources": sources}
+
+
+def _playbook_category(value: str, *, has_remote: bool) -> str:
+    raw = str(value or "").strip().lower()
+    compact = _normalize(raw)
+    if compact in {"web", "http", "browser", "xss"}:
+        return "web"
+    if compact in {"pwn", "pwnable", "binaryexploitation", "exploit"}:
+        return "pwn"
+    if compact in {"rev", "reverse", "reversing", "reverseengineering"}:
+        return "rev"
+    if compact in {"pwnrev"}:
+        return "pwn" if has_remote else "rev"
+    if compact in {"crypto", "cryptography"}:
+        return "crypto"
+    if compact in {"forensics", "forensic", "misc", "stego", "steganography", "hardware", "network"}:
+        return "forensics/misc"
+    if compact in {"osint", "opensourceintelligence", "geoint"}:
+        return "osint"
+    if compact in {"ai", "ml", "aiml", "machinelearning", "llm"}:
+        return "ai/ml"
+    return raw if raw in PLAYBOOK_CATEGORIES else ""
+
+
+def _top_interesting_files(
+    candidate_dirs: Iterable[Path],
+    *,
+    manifest_paths: Iterable[Path],
+    scan_paths: Iterable[Path],
+) -> list[dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
+    manifest_roots: dict[str, Path] = {}
+    for manifest_path in manifest_paths:
+        manifest = _read_json_file(manifest_path)
+        root = _manifest_root(manifest, manifest_path.parent.parent)
+        manifest_roots[manifest_path.as_posix()] = root
+        entries = [entry for entry in manifest.get("files") or [] if isinstance(entry, Mapping)]
+        entries.sort(key=lambda entry: (-int(entry.get("interesting_score") or 0), str(entry.get("path") or "")))
+        for entry in entries[:30]:
+            rel = str(entry.get("path") or "")
+            if not rel or is_sensitive_path(rel):
+                continue
+            key = (root / rel).as_posix()
+            files.setdefault(
+                key,
+                {
+                    "path": rel,
+                    "root": _display(root),
+                    "category": entry.get("category", "unknown"),
+                    "score": int(entry.get("interesting_score") or 0),
+                    "reasons": _list_values(entry.get("reasons"))[:4],
+                },
+            )
+    for scan_path in scan_paths:
+        scan = _read_json_file(scan_path)
+        root = manifest_roots.get((scan_path.parent / "manifest.json").as_posix(), scan_path.parent.parent)
+        for entry in (scan.get("interesting_files") or [])[:30]:
+            if not isinstance(entry, Mapping):
+                continue
+            rel = str(entry.get("path") or "")
+            if not rel or is_sensitive_path(rel):
+                continue
+            key = (root / rel).as_posix()
+            current = files.setdefault(
+                key,
+                {"path": rel, "root": _display(root), "category": entry.get("category", "unknown"), "score": 0, "reasons": []},
+            )
+            current["score"] = max(int(current.get("score") or 0), int(entry.get("score") or 0))
+            current["reasons"] = _dedupe_strings([*_list_values(current.get("reasons")), *_list_values(entry.get("reasons"))])[:4]
+    if not files:
+        for base in candidate_dirs:
+            for subdir in ("raw", "handout", "extracted"):
+                path = base / subdir
+                if not path.exists() or not path.is_dir():
+                    continue
+                for child in sorted(path.rglob("*"))[:50]:
+                    if not child.is_file():
+                        continue
+                    try:
+                        rel = child.relative_to(base).as_posix()
+                    except ValueError:
+                        rel = child.name
+                    if is_sensitive_path(rel):
+                        continue
+                    files.setdefault(
+                        child.as_posix(),
+                        {"path": rel, "root": _display(base), "category": "unknown", "score": 1, "reasons": ["artifact file"]},
+                    )
+                    if len(files) >= 18:
+                        break
+    return sorted(files.values(), key=lambda entry: (-int(entry.get("score") or 0), str(entry.get("path") or "")))[:18]
+
+
+def _manifest_root(manifest: Mapping[str, Any], fallback: Path) -> Path:
+    raw = str(manifest.get("root_dir") or "").strip()
+    if raw:
+        return _expand_display_path(raw)
+    return fallback
+
+
+def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mapping[str, Any], *, agent: str | None) -> str:
+    category_guess = context["category_guess"]
+    playbook = _category_playbook(str(category_guess["category"]))
+    commands = _recommended_first_commands(item, context, playbook)
+    aliases = _list_values(item.get("aliases"))
+    artifact_sources = _list_values(item.get("artifact_sources"))
+    source_ids = _list_values(item.get("source_ids"))
+    lines = [
+        f"# Solver Launch Pack: {_md(str(item.get('canonical_name') or item.get('name') or item.get('challenge_id') or 'challenge'))}",
+        "",
+        f"- generated_at: {utc_now()}",
+        f"- contest_id: {_md(contest_id)}",
+        f"- agent: {_md(agent or 'unassigned')}",
+        f"- status: {_md(str(item.get('status') or 'todo'))}",
+        "",
+        "## Identity",
+        f"- canonical_name: {_md(str(item.get('canonical_name') or item.get('name') or ''))}",
+        f"- canonical_id: {_md(str(item.get('canonical_id') or item.get('challenge_id') or ''))}",
+        f"- challenge_id: {_md(str(item.get('challenge_id') or ''))}",
+        f"- aliases: {_md(', '.join(str(value) for value in aliases) if aliases else 'none')}",
+        f"- artifact_sources: {_md(', '.join(str(value) for value in artifact_sources) if artifact_sources else 'none')}",
+        f"- source_ids: {_md(', '.join(str(value) for value in source_ids) if source_ids else 'none')}",
+        "",
+        "## Category",
+        f"- guess: {_md(str(category_guess.get('category') or 'unknown'))}",
+        f"- declared: {_md(str(category_guess.get('declared') or ''))}",
+        f"- confidence: {int(category_guess.get('confidence') or 0)}",
+        f"- sources: {_md(', '.join(str(value) for value in _list_values(category_guess.get('sources'))) or 'none')}",
+        "",
+        "## Paths",
+        f"- challenge_path: {_md(_display(context['challenge_dir']))}",
+        f"- brief_path: {_md(_display(context['brief_path']) if context.get('brief_path') else 'missing')}",
+        f"- raw_dirs: {_md(', '.join(_display(Path(path)) for path in context.get('raw_dirs') or []) or 'none')}",
+        f"- extracted_dirs: {_md(', '.join(_display(Path(path)) for path in context.get('extracted_dirs') or []) or 'none')}",
+        f"- manifest_paths: {_md(', '.join(_display(Path(path)) for path in context.get('manifest_paths') or []) or 'none')}",
+        "",
+        "## Remote",
+    ]
+    if context["remote_endpoints"]:
+        lines.extend(f"- {_md(endpoint)}" for endpoint in context["remote_endpoints"])
+    else:
+        lines.append("- none detected")
+    lines.extend(["", "## Top Interesting Files"])
+    if context["top_files"]:
+        for entry in context["top_files"][:18]:
+            reasons = ", ".join(str(value) for value in _list_values(entry.get("reasons"))[:4])
+            root = str(entry.get("root") or "")
+            rel = str(entry.get("path") or "")
+            lines.append(
+                f"- {_md(rel)}"
+                + (f" (root: {_md(root)})" if root else "")
+                + f" [{_md(str(entry.get('category') or 'unknown'))}] score={int(entry.get('score') or 0)}"
+                + (f" reasons={_md(reasons)}" if reasons else "")
+            )
+    else:
+        lines.append("- none detected; inspect challenge_path and sync/download state first")
+    lines.extend(["", "## Existing Memory"])
+    for kind in MEMO_KINDS:
+        memo = context["memo_summaries"][kind]
+        lines.append(f"- {kind}: {memo['path']}")
+        if memo.get("summary"):
+            lines.append(f"  summary: {_md(str(memo['summary']))}")
+    lines.extend(["", "## Recommended First Commands", "```bash"])
+    lines.extend(commands)
+    lines.extend(["```", "", "## Category Playbook", f"- category: {_md(playbook['category'])}"])
+    for key in ("first_commands", "common_tools", "expected_evidence", "when_to_stall", "when_to_switch_target"):
+        lines.append(f"- {key}: {_md('; '.join(playbook[key]))}")
+    lines.extend(["", "## Avoid Wasted Time"])
+    lines.extend(f"- {_md(item)}" for item in _avoid_wasted_time(item, context, playbook))
+    lines.extend(
+        [
+            "",
+            "## Stop / Stall Criteria",
+            "- Stall only after recording concrete memory, evidence, attempts, and next_steps.",
+            "- Prefer switching target when no new observable signal remains, setup is blocked, or required remote/service state is unavailable.",
+            "- If stalled, run ctfctl interactive stalled with a compact reason and then ctfctl interactive next.",
+            "",
+            "## Writeup / Cleanup Reminders",
+            "- Submit only high-confidence candidates through ctfctl interactive submit or upload-submit with guards.",
+            "- Local terminal output may include raw flags during solving; do not public paste, upload, commit, or publish flags, writeups, exploits, auth material, cookies, tokens, sessions, browser storage, or private keys during the contest.",
+            "- Accepted-only writeups: ctfctl interactive writeup --languages ko,en --include-code.",
+            "- Run ctfctl interactive cleanup --safe after accepted solve or before leaving a local worktree in a stable state.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _render_compact_brief(contest_id: str, item: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+    memos = context["memo_summaries"]
+    next_steps = str(memos.get("next_steps", {}).get("summary") or "")
+    attempts = str(memos.get("attempts", {}).get("summary") or "")
+    endpoints = ", ".join(context["remote_endpoints"][:4]) if context["remote_endpoints"] else "none"
+    files = ", ".join(str(entry.get("path") or "") for entry in context["top_files"][:5]) if context["top_files"] else "none"
+    lines = [
+        f"# Brief: {_md(str(item.get('canonical_name') or item.get('name') or item.get('challenge_id') or 'challenge'))}",
+        "",
+        f"- contest_id: {_md(contest_id)}",
+        f"- challenge_id: {_md(str(item.get('challenge_id') or ''))}",
+        f"- category: {_md(str(context['category_guess'].get('category') or 'unknown'))} ({int(context['category_guess'].get('confidence') or 0)})",
+        f"- status: {_md(str(item.get('status') or 'todo'))}",
+        f"- path: {_md(_display(context['challenge_dir']))}",
+        f"- brief_path: {_md(_display(context['brief_path']) if context.get('brief_path') else 'missing')}",
+        f"- aliases: {_md(', '.join(str(value) for value in _list_values(item.get('aliases'))) or 'none')}",
+        f"- artifact_sources: {_md(', '.join(str(value) for value in _list_values(item.get('artifact_sources'))) or 'none')}",
+        f"- remote: {_md(endpoints)}",
+        f"- top_files: {_md(files)}",
+        f"- attempts: {_md(attempts or 'none')}",
+        f"- next_steps: {_md(next_steps or 'none')}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _recommended_first_commands(item: Mapping[str, Any], context: Mapping[str, Any], playbook: Mapping[str, Any]) -> list[str]:
+    challenge_dir = Path(context["challenge_dir"]).expanduser()
+    commands = [
+        f"cd {shlex.quote(str(challenge_dir))}",
+        "pwd && find . -maxdepth 3 -type f | sort | sed -n '1,120p'",
+    ]
+    if context.get("brief_path"):
+        try:
+            rel = Path(context["brief_path"]).expanduser().relative_to(challenge_dir)
+            commands.append(f"sed -n '1,220p' {shlex.quote(rel.as_posix())}")
+        except ValueError:
+            commands.append(f"sed -n '1,220p' {shlex.quote(str(Path(context['brief_path']).expanduser()))}")
+    if context.get("remote_endpoints"):
+        commands.append("printf '%s\n' " + " ".join(shlex.quote(endpoint) for endpoint in context["remote_endpoints"][:4]))
+    commands.extend(playbook["first_commands"])
+    category = str(playbook.get("category") or "")
+    if category in {"pwn", "rev"}:
+        first_binary = _first_top_file(context, categories={"binary", "shared_library"})
+        if first_binary:
+            commands.append(f"file {shlex.quote(first_binary)}")
+            if category == "pwn":
+                commands.append(f"checksec --file={shlex.quote(first_binary)} || true")
+            commands.append(f"strings -a -n 4 {shlex.quote(first_binary)} | sed -n '1,120p'")
+    elif category == "web":
+        commands.append("rg -n \"route|app\\.|router\\.|render|template|session|jwt|cookie|upload|fetch|request|sql|eval|exec\" .")
+    elif category == "crypto":
+        commands.append("rg -n \"RSA|AES|ECC|ECDSA|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce\" .")
+    elif category == "forensics/misc":
+        commands.append("find raw handout extracted -maxdepth 3 -type f -print 2>/dev/null | xargs -r file")
+    elif category == "osint":
+        commands.append("rg -n \"https?://|@|coord|lat|lon|username|handle|domain\" .")
+    elif category == "ai/ml":
+        commands.append("find . -maxdepth 4 -type f \\( -name '*.ipynb' -o -name '*.pt' -o -name '*.pth' -o -name '*.onnx' -o -name '*.pkl' -o -name '*.safetensors' -o -name '*.json' \\) | sort")
+    return _dedupe_strings(commands)[:14]
+
+
+def _first_top_file(context: Mapping[str, Any], *, categories: set[str]) -> str:
+    for entry in context.get("top_files") or []:
+        if str(entry.get("category") or "") not in categories:
+            continue
+        root = _expand_display_path(str(entry.get("root") or ""))
+        rel = str(entry.get("path") or "")
+        return str(root / rel) if rel else ""
+    return ""
+
+
+def _category_playbook(category: str) -> dict[str, Any]:
+    normalized = category if category in PLAYBOOK_CATEGORIES else "forensics/misc"
+    playbooks: dict[str, dict[str, Any]] = {
+        "web": {
+            "category": "web",
+            "first_commands": ["rg -n \"TODO|flag|admin|debug|secret\" .", "find . -maxdepth 2 -name 'package.json' -o -name 'requirements.txt' -o -name 'Dockerfile'"],
+            "common_tools": ["curl/httpie", "browser devtools", "python requests", "sqlite3", "node/npm", "flask/express tooling"],
+            "expected_evidence": ["route map", "auth/session model", "input-to-sink path", "working payload and response"],
+            "when_to_stall": ["no reachable service or no route/source signal after bounded triage", "payload class disproven with evidence"],
+            "when_to_switch_target": ["no files and generic statement", "remote down without local reproduction", "needs long blind brute force"],
+        },
+        "pwn": {
+            "category": "pwn",
+            "first_commands": ["file ./* raw/* handout/* extracted/**/* 2>/dev/null", "checksec --file ./chall 2>/dev/null || true", "python3 - <<'PY'\nfrom pwn import *\nprint('pwntools ok')\nPY"],
+            "common_tools": ["file", "checksec", "strings", "gdb/pwndbg", "pwntools", "ROPgadget", "one_gadget"],
+            "expected_evidence": ["protections", "crash offset", "primitive", "libc/ld match", "local exploit transcript"],
+            "when_to_stall": ["no crash or primitive after bounded fuzz/manual audit", "remote-only state cannot be reproduced"],
+            "when_to_switch_target": ["missing binary/libc", "architecture/tooling blocked", "exploit path requires long research"],
+        },
+        "rev": {
+            "category": "rev",
+            "first_commands": ["file ./* raw/* handout/* extracted/**/* 2>/dev/null", "strings -a ./* raw/* handout/* 2>/dev/null | sed -n '1,160p'", "rg -n \"check|verify|flag|key|decrypt|xor|base64\" ."],
+            "common_tools": ["file", "strings", "objdump", "ghidra", "rizin/radare2", "python", "ltrace/strace"],
+            "expected_evidence": ["validation logic", "constants", "decoder/decryptor", "solver script", "verified candidate"],
+            "when_to_stall": ["packed/VM/anti-debug path exceeds bounded triage", "no useful strings or decompile path found"],
+            "when_to_switch_target": ["needs heavy manual reversing while easier targets remain", "tooling cannot open primary artifact"],
+        },
+        "crypto": {
+            "category": "crypto",
+            "first_commands": ["find . -maxdepth 3 -type f | sort", "rg -n \"RSA|ECC|ECDSA|AES|CBC|CTR|GCM|hash|nonce|seed|random|modulus|cipher|sage|Crypto\" ."],
+            "common_tools": ["python", "sage", "sympy", "pycryptodome", "z3", "openssl"],
+            "expected_evidence": ["parameters", "ciphertexts", "oracle behavior", "weakness hypothesis", "decrypt/forge script"],
+            "when_to_stall": ["parameters incomplete", "attack requires unbounded brute force", "oracle/rate limit blocks verification"],
+            "when_to_switch_target": ["only generic statement and no data", "math path unclear after deriving constraints"],
+        },
+        "forensics/misc": {
+            "category": "forensics/misc",
+            "first_commands": ["find . -maxdepth 4 -type f | sort", "find raw handout extracted -maxdepth 3 -type f -print 2>/dev/null | xargs -r file"],
+            "common_tools": ["file", "binwalk", "exiftool", "xxd", "strings", "tshark", "zsteg", "foremost"],
+            "expected_evidence": ["file type/metadata", "hidden stream or payload", "extraction command", "decoded candidate"],
+            "when_to_stall": ["artifact absent/corrupt", "tool output exhausted without signal", "requires manual guessing"],
+            "when_to_switch_target": ["large artifact with no triage signal", "no files and no remote"],
+        },
+        "osint": {
+            "category": "osint",
+            "first_commands": ["sed -n '1,220p' brief.md 2>/dev/null || true", "rg -n \"https?://|domain|username|handle|coord|latitude|longitude|image|photo\" ."],
+            "common_tools": ["whois/dig", "Wayback", "exiftool", "reverse image search", "maps", "username search"],
+            "expected_evidence": ["source URL", "timeline/location/entity", "repeatable query path", "flag derivation"],
+            "when_to_stall": ["current-event writeup search would be required", "only ambiguous guesses remain"],
+            "when_to_switch_target": ["no unique identifiers", "external sites rate-limit or require accounts"],
+        },
+        "ai/ml": {
+            "category": "ai/ml",
+            "first_commands": ["find . -maxdepth 4 -type f | sort", "rg -n \"torch|tensorflow|sklearn|transformers|onnx|pickle|prompt|system\" ."],
+            "common_tools": ["python", "numpy", "torch", "tensorflow", "onnxruntime", "pickletools", "jq"],
+            "expected_evidence": ["model/config format", "inference path", "prompt/training artifact", "exploit/adversarial input"],
+            "when_to_stall": ["model artifact missing", "training/inference cost is too high", "black-box query budget unclear"],
+            "when_to_switch_target": ["requires long model training", "no reproducible evaluation harness"],
+        },
+    }
+    return playbooks[normalized]
+
+
+def _avoid_wasted_time(item: Mapping[str, Any], context: Mapping[str, Any], playbook: Mapping[str, Any]) -> list[str]:
+    avoid = [
+        "Do not work from alias/static/artifact-source names; use the canonical challenge path and IDs above.",
+        "Do not search current-event writeups; use official docs or CVEs only when local version evidence justifies it.",
+        "Do not paste raw auth, browser storage, cookies, tokens, sessions, private keys, or private artifacts into public services.",
+    ]
+    if not _target_has_files(item, context):
+        avoid.append("No local attachments detected; do not assume hidden files exist before checking sync/download state.")
+    if not context.get("remote_endpoints"):
+        avoid.append("No remote endpoint detected; avoid remote exploit work until connection info is found or recorded.")
+    category = str(playbook.get("category") or "")
+    if category == "web":
+        avoid.append("Avoid payload spraying before mapping routes, auth, and sinks.")
+    elif category == "pwn":
+        avoid.append("Avoid remote-only exploitation before a local crash/primitive is documented.")
+    elif category == "crypto":
+        avoid.append("Avoid brute force without a bounded keyspace or mathematical shortcut.")
+    return avoid
+
+
+def _dir_has_files(path: Path) -> bool:
+    try:
+        return any(child.is_file() for child in path.rglob("*"))
+    except OSError:
+        return False
+
+
+def _read_target_text(path: Path, limit: int) -> str:
+    try:
+        with path.expanduser().open("rb") as fh:
+            data = fh.read(limit + 1)
+    except OSError:
+        return ""
+    return _target_safe_text(data[:limit].decode("utf-8", errors="replace"))
+
+
+def _target_summary(text: str, limit: int) -> str:
+    lines = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            lines.append(stripped)
+    compact = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    if len(compact) > limit:
+        compact = compact[:limit].rstrip() + " [truncated]"
+    return _target_safe_text(compact)
+
+
+def _target_safe_text(text: str) -> str:
+    safe = redact_text(str(text or ""))
+    safe = re.sub(r"(?i)\b(cookie|set-cookie)\s*=\s*[^;\s&]+", lambda match: f"{match.group(1)}=[REDACTED]", safe)
+    safe = re.sub(
+        r"(?i)\b(cookie|token|session|storage[_-]?state|private[ _-]?key|password|secret|auth|bearer|jwt)\b\s+([A-Za-z0-9_.-]{4,})",
+        _target_sensitive_word_replacement,
+        safe,
+    )
+    safe = re.sub(
+        r"(?i)\b(?=[A-Za-z0-9_.-]{16,}\b)[A-Za-z0-9_.-]*(?:token|cookie|session|storage[_-]?state|private[_-]?key|password|secret|auth|bearer|jwt)[A-Za-z0-9_.-]*\b",
+        "[REDACTED]",
+        safe,
+    )
+    return safe
+
+
+def _target_sensitive_word_replacement(match: re.Match[str]) -> str:
+    label = match.group(1)
+    value = match.group(2)
+    if len(value) >= 12 or not value.isalpha():
+        return f"{label} [REDACTED]"
+    return match.group(0)
+
+
+def _expand_display_path(raw: str) -> Path:
+    text = str(raw or "").strip()
+    if text.startswith("~/"):
+        text = str(Path.home()) + text[1:]
+    return Path(text).expanduser()
 
 
 def _ensure_challenge_memos(path: Path) -> None:

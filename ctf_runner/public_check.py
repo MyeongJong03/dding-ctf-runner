@@ -223,6 +223,9 @@ def run_public_check(
         "interactive_metrics_baseline": "./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json",
         "interactive_metrics_publish_snapshot_active_block": "./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json",
         "interactive_prompt": "./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1",
+        "interactive_next": "./scripts/ctfctl interactive next --contest-id release-interactive-smoke --agent smoke-1 --dry-run --json",
+        "interactive_target_pack": "./scripts/ctfctl interactive target-pack --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",
+        "interactive_brief": "./scripts/ctfctl interactive brief --contest-id release-interactive-smoke --challenge-id <id> --json",
     }
     legacy_advanced_test_commands = {
         "legacy_fake_ctfd_smoke": "./scripts/ctfctl fake-ctfd smoke --json",

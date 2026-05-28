@@ -154,15 +154,16 @@ Paste a different generated prompt into each Codex session. These are CTF-solvin
 
 Each solver should:
 
-- claim one challenge
+- run `interactive next` to pick and claim one high-signal canonical challenge
+- read the generated target pack before solving
 - solve and verify locally
 - submit only through `ctfctl interactive submit` or `upload-submit`
 - write accepted-only ko/en writeups
 - clean safe temporary files
-- claim the next challenge
+- move to the next challenge unless the user stops the loop
 - keep self memos current to prevent context drift
 
-`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive claim` only returns canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive next` and `interactive claim` return canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
 
 ## 6. Interactive Commands
 
@@ -172,7 +173,31 @@ Board:
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
-Claim next challenge:
+Pick and claim the next target:
+
+```bash
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+```
+
+`next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps`. It skips alias/static/artifact-source rows, solved/external-solved challenges, and generic no-file shells. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
+
+Generate or refresh the solver launch pack:
+
+```bash
+ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
+```
+
+The pack is written under `operator/target-packs/` and includes canonical name, aliases, artifact sources, real challenge/brief/raw/extracted paths, remote connection info, top interesting files, current memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, a category playbook, stall criteria, and accepted-only writeup/cleanup reminders. It does not include raw auth material, cookies, tokens, sessions, browser storage, or private keys.
+
+Compact current-target status:
+
+```bash
+ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+Use `brief` when the user asks "지금 뭐 하고 있음?" so the solver can answer from local state and continue the loop.
+
+Manual claim remains available:
 
 ```bash
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
