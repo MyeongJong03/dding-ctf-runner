@@ -35,7 +35,11 @@ def test_public_check_docs_and_gitignore_coverage_ok(tmp_path: Path):
     assert result["repo_local_forbidden_paths"] == []
     assert result["uv_lock"]["policy_ok"] is True
     assert result["release_commands"]["missing"] == []
-    assert "mock_full_rehearsal" in result["test_commands"]
+    assert "interactive_e2e_smoke" in result["interactive_test_commands"]
+    assert "interactive_metrics_baseline" in result["interactive_test_commands"]
+    assert "interactive_prompt" in result["interactive_test_commands"]
+    assert "legacy_mock_full_rehearsal" in result["legacy_advanced_test_commands"]
+    assert "mock_full_rehearsal" not in result["test_commands"]
     assert "fresh_clone_check" in result["test_commands"]
 
 

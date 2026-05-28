@@ -125,17 +125,24 @@ For event-day commands, use [OPERATIONS.md](OPERATIONS.md). For the full user gu
 
 ## Release Check
 
-Before publishing or merging public docs:
+Before publishing or merging public docs, run the interactive-first release gate:
 
 ```bash
 python3 -m compileall -q ctf_runner
 python3 -m pytest -q
+./scripts/ctfctl interactive init --contest-id release-interactive-smoke --writeup-root /tmp/dding-ctf-runner-release-writeups --agents 2 --json
+./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json
+./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
+./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json  # expected blocked
+./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1
 ./scripts/release-check.sh
 ./scripts/ctfctl repo public-check --json
 ./scripts/fresh-clone-check.sh
 ./scripts/history-scan.sh
 git diff --check
 ```
+
+`public-check` reports these under `interactive_test_commands`. Legacy full-rehearsal and background worker checks remain under legacy/advanced command metadata.
 
 Do not push public git changes from this repo during live CTF work.
 

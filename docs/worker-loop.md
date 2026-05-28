@@ -8,6 +8,11 @@ Codex sessions with `cd ~/CTF && codex`. See
 Use the worker loop only for fake/local E2E, compatibility tests, or an
 explicit advanced automation decision.
 
+Release/public checks now center the interactive workflow: `interactive init`,
+`interactive e2e-smoke`, metrics baseline/public-snapshot safety, and prompt
+generation. Worker local E2E and full rehearsal remain legacy/advanced
+compatibility checks.
+
 ## Guarded Modes
 
 Worker execution is guarded by run mode:

@@ -217,6 +217,20 @@ def run_public_check(
     if untracked:
         warnings.append("untracked_files_present")
 
+    interactive_test_commands = {
+        "interactive_init": "./scripts/ctfctl interactive init --contest-id release-interactive-smoke --writeup-root /tmp/dding-ctf-runner-release-writeups --agents 2 --json",
+        "interactive_e2e_smoke": "./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json",
+        "interactive_metrics_baseline": "./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json",
+        "interactive_metrics_publish_snapshot_active_block": "./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json",
+        "interactive_prompt": "./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1",
+    }
+    legacy_advanced_test_commands = {
+        "legacy_fake_ctfd_smoke": "./scripts/ctfctl fake-ctfd smoke --json",
+        "legacy_worker_local_e2e": "./scripts/ctfctl worker local-e2e --workers 3 --solver mock --fake-ctfd --json",
+        "legacy_mock_full_rehearsal": "./scripts/ctfctl contest full-rehearsal --contest-id final-fake --workers 5 --solver mock --json",
+        "legacy_codex_mini_rehearsal": "./scripts/ctfctl contest full-rehearsal --contest-id final-fake-codex --workers 3 --max-parallel-codex 2 --solver codex --allow-codex-call --json",
+    }
+
     result = {
         "status": "ok" if not high else "blocked",
         "high": high,
@@ -237,14 +251,13 @@ def run_public_check(
         "content_findings": content_findings,
         "public_doc_findings": public_doc_findings,
         "preflight": preflight_summary,
+        "interactive_test_commands": interactive_test_commands,
+        "legacy_advanced_test_commands": legacy_advanced_test_commands,
         "test_commands": {
             "compileall": "python3 -m compileall -q ctf_runner",
             "pytest": "python3 -m pytest -q",
             "preflight": "./scripts/ctfctl preflight --deep --json",
-            "fake_ctfd_smoke": "./scripts/ctfctl fake-ctfd smoke --json",
-            "local_e2e": "./scripts/ctfctl worker local-e2e --workers 3 --solver mock --fake-ctfd --json",
-            "mock_full_rehearsal": "./scripts/ctfctl contest full-rehearsal --contest-id final-fake --workers 5 --solver mock --json",
-            "codex_mini_rehearsal": "./scripts/ctfctl contest full-rehearsal --contest-id final-fake-codex --workers 3 --max-parallel-codex 2 --solver codex --allow-codex-call --json",
+            **interactive_test_commands,
             "public_check": "./scripts/ctfctl repo public-check --json",
             "release_check": "./scripts/release-check.sh",
             "fresh_clone_check": "./scripts/fresh-clone-check.sh",
@@ -466,7 +479,7 @@ def _release_command_status(root: Path) -> dict[str, Any]:
         "required": list(REQUIRED_RELEASE_SCRIPTS),
         "missing": missing,
         "not_executable": not_executable,
-        "fake_full_rehearsal_available": (root / "scripts" / "ctfctl").exists(),
+        "legacy_full_rehearsal_available": (root / "scripts" / "ctfctl").exists(),
     }
 
 

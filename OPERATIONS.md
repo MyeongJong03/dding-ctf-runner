@@ -159,3 +159,24 @@ Use this operational order:
 ## 8. Legacy Background Workers
 
 `contest start-workers`, `worker_loop`, `worker_supervisor`, `multi_worker`, and `scripts/ctf-worker-*` are legacy/advanced. They are for rehearsals and explicit automation experiments, not the normal contest-day runbook.
+
+## 9. Pre-Release Check
+
+Use the interactive-first release gate before public docs or release changes:
+
+```bash
+python3 -m compileall -q ctf_runner
+python3 -m pytest -q
+./scripts/ctfctl interactive init --contest-id release-interactive-smoke --writeup-root /tmp/dding-ctf-runner-release-writeups --agents 2 --json
+./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json
+./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
+./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json  # expected blocked
+./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1
+./scripts/release-check.sh
+./scripts/ctfctl repo public-check --json
+./scripts/fresh-clone-check.sh
+./scripts/history-scan.sh
+git diff --check
+```
+
+`release-check.sh`, `public-check`, and `fresh-clone-check.sh` should center interactive init, e2e smoke, metrics, prompt generation, and active-contest public snapshot blocking. Legacy worker/full-rehearsal coverage may remain, but only as advanced compatibility coverage.

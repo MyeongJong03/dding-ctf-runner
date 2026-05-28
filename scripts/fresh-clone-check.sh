@@ -14,7 +14,7 @@ Usage: scripts/fresh-clone-check.sh [--keep-dir] [--dest DIR]
 
 Creates a temporary file:// clone of the current repository, overlays current
 uncommitted tracked and untracked non-ignored changes, then runs the public-safe
-release smoke commands without external CTF traffic.
+interactive-first release smoke commands without external CTF traffic.
 EOF
 }
 
@@ -153,10 +153,12 @@ run_required compileall python3 -m compileall -q ctf_runner
 run_required pytest python3 -m pytest -q
 run_required release_check ./scripts/release-check.sh
 run_required preflight ./scripts/ctfctl preflight --deep --json
+run_required interactive_e2e ./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --writeup-root "$DEST/.fresh-clone-check/interactive-writeups" --json
 run_required fake_ctfd_smoke ./scripts/ctfctl fake-ctfd smoke --json
 run_required local_e2e ./scripts/ctfctl worker local-e2e --workers 3 --solver mock --fake-ctfd --json
 
 summarize_json_log preflight
+summarize_json_log interactive_e2e
 summarize_json_log fake_ctfd_smoke
 summarize_json_log local_e2e
 

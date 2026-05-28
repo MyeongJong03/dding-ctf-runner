@@ -18,6 +18,7 @@ def test_fresh_clone_check_script_help_is_public_safe():
     assert result.returncode == 0
     assert "--keep-dir" in result.stdout
     assert "external CTF" in result.stdout
+    assert "interactive" in result.stdout.lower()
     assert "cookie" not in result.stdout.lower()
 
 

@@ -169,7 +169,7 @@ Loopback-only checks:
 ./scripts/ctfctl contest supervisor-smoke --workers 3 --solver mock --fake-ctfd --json
 ```
 
-Full fake rehearsal:
+Legacy/advanced full fake rehearsal:
 
 ```bash
 ./scripts/ctfctl contest full-rehearsal --contest-id final-fake --workers 5 --solver mock --json
@@ -181,9 +181,13 @@ Reports are local-only under
 
 ## Release Hardening
 
+Default release hardening is interactive-first. Keep worker/full-rehearsal checks as legacy/advanced compatibility coverage.
+
 ```bash
 python3 -m compileall -q ctf_runner
 python3 -m pytest -q
+./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json
+./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
 ./scripts/release-check.sh
 ./scripts/ctfctl repo public-check --json
 ./scripts/fresh-clone-check.sh

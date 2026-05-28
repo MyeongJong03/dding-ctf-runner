@@ -393,16 +393,23 @@ Do not use this as the default live contest workflow. See [docs/contest-operatio
 
 ## 12. Public Safety
 
-Before publishing:
+Before publishing, use the interactive-first release gate:
 
 ```bash
 python3 -m compileall -q ctf_runner
 python3 -m pytest -q
+./scripts/ctfctl interactive init --contest-id release-interactive-smoke --writeup-root /tmp/dding-ctf-runner-release-writeups --agents 2 --json
+./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json
+./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
+./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json  # expected blocked
+./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1
 ./scripts/release-check.sh
 ./scripts/ctfctl repo public-check --json
 ./scripts/fresh-clone-check.sh
 ./scripts/history-scan.sh
 git diff --check
 ```
+
+`public-check` exposes the default release commands under `interactive_test_commands`. Background worker full-rehearsal commands are still available, but they are legacy/advanced checks rather than the default release summary.
 
 Do not push public git changes from this repo during active CTF work.

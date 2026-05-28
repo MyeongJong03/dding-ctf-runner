@@ -233,6 +233,27 @@ def test_interactive_e2e_smoke_full_fake_loop(tmp_path: Path, monkeypatch):
     assert not list(writeup_root.glob("*stalled*Writeup.*.md"))
 
 
+def test_interactive_e2e_smoke_allows_release_smoke_id(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+
+    result = _run_json(
+        [
+            "interactive",
+            "e2e-smoke",
+            "--contest-id",
+            "release-interactive-e2e",
+            "--agents",
+            "2",
+            "--writeup-root",
+            str(tmp_path / "writeups"),
+            "--json",
+        ]
+    )
+
+    assert result["status"] == "ok"
+    assert all(result["checks"].values())
+
+
 class FakeAcceptedPlatform:
     policy = {"allow_submission": True}
 

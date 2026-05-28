@@ -1320,7 +1320,9 @@ def _undisplay_path(value: str) -> Path:
 
 def _is_fake_or_local_contest_id(contest_id: str) -> bool:
     lowered = str(contest_id or "").strip().lower()
-    return lowered in {"fake", "local", "local-fake", "fake-ctfd"} or lowered.startswith(("fake-", "fake_", "local-", "local_", "final-fake"))
+    return lowered in {"fake", "local", "local-fake", "fake-ctfd"} or lowered.startswith(
+        ("fake-", "fake_", "local-", "local_", "final-fake", "release-")
+    )
 
 
 def _ensure_metrics_files(root: Path) -> Path:

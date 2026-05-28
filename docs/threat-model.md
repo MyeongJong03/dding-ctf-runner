@@ -106,7 +106,7 @@ Controls:
 - Stale Codex install cleanup is dry-run by default and only renames confirmed older symlinks when `--apply` is passed.
 - Secrets stay outside git, runtime artifacts stay ignored, and CLI output is redacted before display.
 - `ctfctl repo public-check --json` rejects required-doc gaps, missing release scripts, repo-local runtime directories, sensitive filenames, public doc flag-like literals, and non-generic real-event references.
-- `scripts/fresh-clone-check.sh` validates a temporary public-style clone with compile, tests, release-check, preflight, fake CTFd smoke, and mock local E2E.
+- `scripts/fresh-clone-check.sh` validates a temporary public-style clone with compile, tests, release-check, preflight, interactive e2e smoke, fake CTFd smoke, and mock local E2E.
 - `scripts/history-scan.sh` reports sensitive path names across git history and sensitive HEAD patterns by file/pattern only. It does not print matched values.
 - Live platform actions remain gated through `ctfctl`, `--live`, and `--confirm` instead of direct worker shell shortcuts.
 - Operators can opt down from default danger mode with `CTF_CODEX_DANGER=0` and a narrower `CTF_CODEX_SANDBOX`.
