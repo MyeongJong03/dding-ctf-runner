@@ -154,8 +154,8 @@ Paste a different generated prompt into each Codex session. These are CTF-solvin
 
 Each solver should:
 
-- run `interactive next` to pick and claim one high-signal canonical challenge
-- read the generated target pack before solving
+- run `interactive prepare-target` to pick or prepare one high-signal canonical challenge
+- read the generated target pack, triage summary, and starter before solving
 - solve and verify locally
 - submit only through `ctfctl interactive submit` or `upload-submit`
 - write accepted-only ko/en writeups
@@ -181,6 +181,15 @@ ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 
 `next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps`. It skips alias/static/artifact-source rows, solved/external-solved challenges, and generic no-file shells. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
 
+Prepare a target for immediate solving:
+
+```bash
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
+```
+
+`prepare-target` runs the target planner, target pack, local auto-triage, and starter generation as one shell-first step. If `--challenge-id` is omitted, it runs `interactive next`; otherwise it prepares the specified canonical challenge or alias. The JSON returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. Read the target pack, triage summary, and starter file before manual analysis.
+
 Generate or refresh the solver launch pack:
 
 ```bash
@@ -188,6 +197,15 @@ ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-
 ```
 
 The pack is written under `operator/target-packs/` and includes canonical name, aliases, artifact sources, real challenge/brief/raw/extracted paths, remote connection info, top interesting files, current memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, a category playbook, stall criteria, and accepted-only writeup/cleanup reminders. It does not include raw auth material, cookies, tokens, sessions, browser storage, or private keys.
+
+Run local auto-triage and create a starter explicitly:
+
+```bash
+ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
+ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category <category> --json
+```
+
+`triage` never connects to external CTF services. It reads local raw/handout/extracted files, `brief.md`, manifests, and memos, then writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`. It updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `starter` creates a category-specific skeleton such as `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, or `solve_misc.py`, and records the path in board/operator metadata. These commands do not create writeups; writeups remain accepted-only.
 
 Compact current-target status:
 

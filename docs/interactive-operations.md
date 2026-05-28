@@ -70,9 +70,13 @@ Sync and board canonicalization:
 Target planning and claim:
 
 ```bash
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --category web --dry-run --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
+ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
+ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category web --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge <id> --json
@@ -85,6 +89,8 @@ Default claim returns only canonical rows where `claimable` is true. If a solver
 - positive: local attachments or downloaded handout files, detected remote endpoints, confident category, previous memory/evidence/attempts/operator notes, and clear `next_steps`
 - retryable: stalled challenges with concrete `next_steps` when no fresh todo target remains
 - negative or excluded: static shell rows, alias/artifact-source rows, generic no-file statements, claimed rows unless `--allow-duplicate`, solved, and external-solved
+
+`prepare-target` is the preferred Codex entrypoint. If `--challenge-id` is omitted, it runs `next`; otherwise it prepares the specified challenge or alias. It generates the target pack, runs local-only category triage, creates the category starter skeleton, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`.
 
 On success, `next` claims the selected challenge and returns `target_pack_path`. With `--dry-run`, it writes the pack and reports the target without creating a claim lock.
 
@@ -99,6 +105,10 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 - recommended first commands, a short category playbook, wasted-time warnings, stall criteria, and writeup/cleanup reminders
 
 Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving; public upload, public writeup, public paste, and git push of flags or private artifacts remain forbidden during the contest.
+
+`interactive triage` reads only local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started` and `triage_completed` metrics.
+
+`interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with a `requests.Session`, `exploit.py` with pwntools, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
 
 `interactive brief` prints a compact status view for a target. Use it when the operator asks "지금 뭐 하고 있음?" so a Codex can answer from local state and keep moving.
 

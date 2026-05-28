@@ -56,15 +56,18 @@ Monitor board:
 
 Board sync is canonical-first. Alias/static shell rows stay in `board.json` under the canonical challenge as `aliases`, `artifact_sources`, and `source_ids`; default claims skip them. Check `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count` after sync if the platform publishes duplicate rows.
 
-Pick the next target and read the launch pack:
+Pick or prepare the next target:
 
 ```bash
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
+ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
+ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ```
 
-`next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or stalled `next_steps`. It skips alias/static rows and solved/external-solved work. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook so the next Codex can continue without rediscovering context. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
+`prepare-target` is the default Codex starter: it runs `next` when needed, generates the target pack, runs local-only category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. `next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or stalled `next_steps`. It skips alias/static rows and solved/external-solved work. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos. `starter` creates the category solve skeleton and records it in board/operator metadata. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
 
 Add operator information:
 

@@ -41,6 +41,9 @@ def test_interactive_prompt_allows_local_flag_output_and_bans_public_upload(tmp_
     assert "public pastes" in prompt
     assert "Writeups are local-only during the contest and accepted-only" in prompt
     assert "ctfctl interactive next" in prompt
+    assert "ctfctl interactive prepare-target" in prompt
+    assert "triage_summary_path" in prompt
+    assert "starter_path" in prompt
     assert "target_pack_path" in prompt
     assert "ctfctl interactive target-pack" in prompt
 
@@ -271,6 +274,100 @@ def test_interactive_brief_outputs_compact_target_state(tmp_path: Path, monkeypa
     assert "# Brief: Real Target" in result["brief"]
     assert "artifact_sources:" in result["brief"]
     assert "top_files:" in result["brief"]
+
+
+def test_interactive_triage_creates_summary_updates_memos_and_metrics_for_fake_rev(tmp_path: Path, monkeypatch):
+    _seed_rev_triage_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "triage", "--contest-id", "rev-triage", "--challenge-id", "crackme", "--agent", "a1", "--json"])
+
+    root = tmp_path / "contests" / "rev-triage"
+    challenge = root / "rev" / "Crackme"
+    summary = Path(result["triage_summary_path"].replace("~", str(Path.home()), 1))
+    events = (root / "operator" / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert result["category"] == "rev"
+    assert summary.exists()
+    assert "# Auto Triage: Crackme" in summary.read_text(encoding="utf-8")
+    assert (challenge / "triage" / "files.json").exists()
+    assert (challenge / "triage" / "commands.jsonl").exists()
+    assert (challenge / "triage" / "findings.jsonl").exists()
+    assert "Auto Triage" in (challenge / "evidence.md").read_text(encoding="utf-8")
+    assert "Auto Triage Next Steps" in (challenge / "next_steps.md").read_text(encoding="utf-8")
+    assert "auto_triage" in (challenge / "memory.md").read_text(encoding="utf-8")
+    assert "triage_started" in events
+    assert "triage_completed" in events
+    assert not list((root / "operator" / "writeups").glob("*Writeup.*.md"))
+
+
+def test_interactive_starter_creates_solve_rev_with_full_path_references(tmp_path: Path, monkeypatch):
+    _seed_rev_triage_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "starter", "--contest-id", "rev-triage", "--challenge-id", "crackme", "--category", "rev", "--json"])
+
+    root = tmp_path / "contests" / "rev-triage"
+    challenge = root / "rev" / "Crackme"
+    starter = Path(result["starter_path"].replace("~", str(Path.home()), 1))
+    operator = json.loads((root / "operator" / "operator.json").read_text(encoding="utf-8"))
+    board = json.loads((root / "operator" / "board.json").read_text(encoding="utf-8"))
+    text = starter.read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert starter.name == "solve_rev.py"
+    assert str(challenge) in text
+    assert "subprocess.run" in text
+    assert "z3" in text
+    assert operator["challenge_solver_metadata"]["crackme"]["starter_path"] == str(starter)
+    assert board["solver_metadata"]["crackme"]["starter_path"] == str(starter)
+    assert not list((root / "operator" / "writeups").glob("*Writeup.*.md"))
+
+
+def test_interactive_prepare_target_returns_target_pack_triage_and_starter(tmp_path: Path, monkeypatch):
+    _seed_rev_triage_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "prepare-target", "--contest-id", "rev-triage", "--agent", "a1", "--challenge-id", "crackme", "--json"])
+
+    assert result["status"] == "ok"
+    assert Path(result["target_pack_path"].replace("~", str(Path.home()), 1)).exists()
+    assert Path(result["triage_summary_path"].replace("~", str(Path.home()), 1)).exists()
+    assert Path(result["starter_path"].replace("~", str(Path.home()), 1)).exists()
+    assert result["top_files"]
+    assert result["first_commands"]
+    assert result["next_steps"]
+
+
+def test_interactive_prepare_target_without_challenge_claims_next(tmp_path: Path, monkeypatch):
+    _seed_rev_triage_board(tmp_path, monkeypatch)
+
+    result = _run_json(["interactive", "prepare-target", "--contest-id", "rev-triage", "--agent", "a1", "--json"])
+
+    assert result["status"] == "ok"
+    assert result["challenge_id"] == "crackme"
+    assert result["selection"]["status"] == "claimed"
+    assert Path(result["starter_path"].replace("~", str(Path.home()), 1)).exists()
+
+
+def test_interactive_starter_generation_smoke_web_pwn_crypto(tmp_path: Path, monkeypatch):
+    for category, expected in [("web", "solve_web.py"), ("pwn", "exploit.py"), ("crypto", "solve_crypto.py")]:
+        contest_id = f"starter-{category}"
+        _seed_category_starter_board(tmp_path, monkeypatch, contest_id=contest_id, category=category)
+
+        result = _run_json(["interactive", "starter", "--contest-id", contest_id, "--challenge-id", "demo", "--category", category, "--json"])
+
+        starter = Path(result["starter_path"].replace("~", str(Path.home()), 1))
+        assert result["status"] == "ok"
+        assert starter.name == expected
+        assert starter.exists()
+        text = starter.read_text(encoding="utf-8")
+        assert str(tmp_path / "contests" / contest_id / category / "Demo") in text
+        if category == "web":
+            assert "requests.Session" in text
+        elif category == "pwn":
+            assert "from pwn import" in text
+        elif category == "crypto":
+            assert "parse_ints" in text
+        assert not list((tmp_path / "contests" / contest_id / "operator" / "writeups").glob("*Writeup.*.md"))
 
 
 def test_interactive_next_can_retry_stalled_with_clear_next_steps_when_no_fresh_todo(tmp_path: Path, monkeypatch):
@@ -1027,6 +1124,82 @@ def _seed_pwn_target_board(tmp_path: Path, monkeypatch) -> None:
                         "canonical_name": "Overflow",
                         "category": "pwn",
                         "statement": "Exploit the service at nc pwn.example 4444.",
+                        "status": "todo",
+                        "priority": 100,
+                        "has_files": True,
+                        "file_count": 1,
+                        "claimable": True,
+                        "path": str(challenge),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_rev_triage_board(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    _run_json(["interactive", "init", "--contest-id", "rev-triage", "--json"])
+    root = tmp_path / "contests" / "rev-triage"
+    challenge = root / "rev" / "Crackme"
+    raw = challenge / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "crackme").write_bytes(b"\x7fELF\x02\x01\x01\x00fake-rev-binary-check-verify-key")
+    (raw / "notes.txt").write_text("verify candidate with xor key and base64 decoder\n", encoding="utf-8")
+    (challenge / "brief.md").write_text("# Brief\nReverse the crackme and recover the key.\n", encoding="utf-8")
+    (root / "operator" / "board.json").write_text(
+        json.dumps(
+            {
+                "contest_id": "rev-triage",
+                "challenges": [
+                    {
+                        "challenge_id": "crackme",
+                        "name": "Crackme",
+                        "canonical_id": "crackme",
+                        "canonical_name": "Crackme",
+                        "category": "rev",
+                        "statement": "Reverse the local crackme.",
+                        "status": "todo",
+                        "priority": 100,
+                        "has_files": True,
+                        "file_count": 2,
+                        "claimable": True,
+                        "path": str(challenge),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_category_starter_board(tmp_path: Path, monkeypatch, *, contest_id: str, category: str) -> None:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    _run_json(["interactive", "init", "--contest-id", contest_id, "--json"])
+    root = tmp_path / "contests" / contest_id
+    challenge = root / category / "Demo"
+    raw = challenge / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    if category == "web":
+        (raw / "app.py").write_text("from flask import Flask\napp=Flask(__name__)\n@app.route('/api/check')\ndef check(): pass\n", encoding="utf-8")
+    elif category == "pwn":
+        (raw / "chall").write_bytes(b"\x7fELF\x02\x01\x01\x00demo-pwn")
+    elif category == "crypto":
+        (raw / "params.txt").write_text("n = 3233\ne = 17\nc = 855\n", encoding="utf-8")
+    (challenge / "brief.md").write_text(f"# Brief\n{category} starter smoke.\n", encoding="utf-8")
+    (root / "operator" / "board.json").write_text(
+        json.dumps(
+            {
+                "contest_id": contest_id,
+                "challenges": [
+                    {
+                        "challenge_id": "demo",
+                        "name": "Demo",
+                        "canonical_id": "demo",
+                        "canonical_name": "Demo",
+                        "category": category,
+                        "statement": f"{category} local starter smoke.",
                         "status": "todo",
                         "priority": 100,
                         "has_files": True,

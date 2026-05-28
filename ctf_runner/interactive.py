@@ -400,6 +400,221 @@ def challenge_brief(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
     }
 
 
+def triage_challenge(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    agent: str | None = None,
+    category: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    pack = target_pack(contest_id, challenge_id=challenge_key, agent=agent)
+    context = _target_context(contest_id, root, item)
+    effective_category = _effective_triage_category(category, context)
+    started = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="triage_started",
+        agent=agent,
+        challenge_id=challenge_key,
+        data={"category": effective_category},
+    )
+
+    files = _triage_file_inventory(context)
+    command_rows = _run_category_triage_commands(effective_category, context, files)
+    findings = _category_triage_findings(effective_category, item, context, files, command_rows)
+    next_steps = _triage_next_steps(effective_category, findings, context)
+
+    triage_dir = Path(context["challenge_dir"]) / "triage"
+    triage_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = triage_dir / "summary.md"
+    files_path = triage_dir / "files.json"
+    commands_path = triage_dir / "commands.jsonl"
+    findings_path = triage_dir / "findings.jsonl"
+
+    summary = _render_triage_summary(
+        contest_id,
+        item,
+        context,
+        effective_category,
+        files,
+        command_rows,
+        findings,
+        next_steps,
+        target_pack_path=str(pack.get("target_pack_path") or ""),
+        started_at=str(started.get("timestamp") or ""),
+    )
+    summary_path.write_text(_target_safe_text(summary), encoding="utf-8")
+    _write_json(
+        files_path,
+        {
+            "schema": "interactive_triage_files_v1",
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "category": effective_category,
+            "generated_at": utc_now(),
+            "files": files,
+        },
+    )
+    _write_jsonl(commands_path, command_rows)
+    _write_jsonl(findings_path, findings)
+
+    _append_triage_memos(
+        Path(context["challenge_dir"]),
+        category=effective_category,
+        summary_path=summary_path,
+        files_path=files_path,
+        commands_path=commands_path,
+        findings_path=findings_path,
+        findings=findings,
+        next_steps=next_steps,
+    )
+    metadata = {
+        "challenge_id": challenge_key,
+        "category": effective_category,
+        "summary_path": _display(summary_path),
+        "files_path": _display(files_path),
+        "commands_path": _display(commands_path),
+        "findings_path": _display(findings_path),
+        "target_pack_path": pack.get("target_pack_path") or "",
+        "updated_at": utc_now(),
+    }
+    _save_challenge_triage_metadata(root, board, challenge_key, metadata)
+    completed = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="triage_completed",
+        agent=agent,
+        challenge_id=challenge_key,
+        data={
+            "category": effective_category,
+            "finding_count": len(findings),
+            "command_count": len(command_rows),
+            "summary_path": _display(summary_path),
+        },
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "category": effective_category,
+        "target_pack_path": pack.get("target_pack_path") or "",
+        "triage_summary_path": _display(summary_path),
+        "files_path": _display(files_path),
+        "commands_path": _display(commands_path),
+        "findings_path": _display(findings_path),
+        "top_files": [_display(_triage_file_path(row)) for row in files[:8]],
+        "first_commands": [str(row.get("command") or "") for row in command_rows[:8]],
+        "next_steps": next_steps,
+        "metrics": {"started_at": started.get("timestamp"), "completed_at": completed.get("timestamp")},
+    }
+
+
+def starter_challenge(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    category: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+
+    context = _target_context(contest_id, root, item)
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    effective_category = _effective_triage_category(category, context)
+    starter_path = Path(context["challenge_dir"]) / _starter_filename(effective_category)
+    starter_path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    if not starter_path.exists():
+        starter_path.write_text(_starter_source(effective_category, contest_id, item, context), encoding="utf-8")
+        created = True
+
+    metadata = {
+        "challenge_id": challenge_key,
+        "category": effective_category,
+        "starter_path": _display(starter_path),
+        "status": "created" if created else "preserved",
+        "updated_at": utc_now(),
+    }
+    _save_challenge_solver_metadata(root, board, challenge_key, metadata)
+    _append_starter_memos(Path(context["challenge_dir"]), starter_path=starter_path, category=effective_category, created=created)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="starter_created",
+        challenge_id=challenge_key,
+        data={"category": effective_category, "starter_path": _display(starter_path), "status": metadata["status"]},
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "category": effective_category,
+        "starter_path": _display(starter_path),
+        "created": created,
+        "metadata": metadata,
+    }
+
+
+def prepare_target(
+    contest_id: str,
+    *,
+    agent: str,
+    challenge_id: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    selected: dict[str, Any] = {}
+    effective_challenge = challenge_id
+    if not effective_challenge:
+        selected = next_challenge(contest_id, agent=agent)
+        if selected.get("status") not in {"claimed", "planned"}:
+            return {
+                "status": selected.get("status") or "blocked",
+                "contest_id": contest_id,
+                "agent": agent,
+                "reason": selected.get("reason") or "no_target",
+                "selection": selected,
+            }
+        effective_challenge = str(selected.get("challenge_id") or "")
+    if not effective_challenge:
+        return {"status": "blocked", "contest_id": contest_id, "agent": agent, "reason": "challenge_id_missing"}
+
+    triage = triage_challenge(contest_id, challenge_id=effective_challenge, agent=agent)
+    if triage.get("status") != "ok":
+        return {"status": triage.get("status") or "blocked", "contest_id": contest_id, "agent": agent, "triage": triage}
+    starter = starter_challenge(contest_id, challenge_id=str(triage.get("challenge_id") or effective_challenge), category=str(triage.get("category") or ""))
+    if starter.get("status") != "ok":
+        return {"status": starter.get("status") or "blocked", "contest_id": contest_id, "agent": agent, "triage": triage, "starter": starter}
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "agent": agent,
+        "challenge_id": triage.get("challenge_id") or effective_challenge,
+        "category": triage.get("category") or starter.get("category") or "",
+        "target_pack_path": triage.get("target_pack_path") or selected.get("target_pack_path") or "",
+        "triage_summary_path": triage.get("triage_summary_path") or "",
+        "starter_path": starter.get("starter_path") or "",
+        "top_files": triage.get("top_files") or [],
+        "first_commands": triage.get("first_commands") or [],
+        "next_steps": triage.get("next_steps") or [],
+        "selection": selected,
+    }
+
+
 def release_claim(contest_id: str, *, agent: str, challenge: str | None = None, reason: str = "") -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
@@ -1057,6 +1272,9 @@ def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None =
             "upload_submit": True,
             "next": True,
             "target_pack": True,
+            "triage": True,
+            "starter": True,
+            "prepare_target": True,
             "brief": True,
         },
         "prompt_policy_summary": {
@@ -1254,9 +1472,10 @@ Loop policy:
 - If the user asks what you are doing, answer from ctfctl interactive brief or the current target pack without stopping the loop.
 
 Coordination:
-- Prefer target selection with: ctfctl interactive next --contest-id {contest_id} --agent {agent} --json.
-- The next result includes target_pack_path. Read that file before opening random files or trying payloads.
-- If you manually claim with ctfctl interactive claim, immediately run ctfctl interactive target-pack --contest-id {contest_id} --challenge-id <id> --agent {agent} --json and read target_pack_path.
+- Prefer target preparation with: ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --json.
+- The prepare-target result claims or selects a challenge, writes target_pack_path, triage_summary_path, and starter_path. Read the target pack, triage summary, and starter before manual analysis.
+- If you manually claim with ctfctl interactive claim, immediately run ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --challenge-id <id> --json.
+- If prepare-target is unavailable, run ctfctl interactive target-pack, then ctfctl interactive triage, then ctfctl interactive starter for the same challenge.
 - Same-machine duplicate claims are blocked by default. Use --allow-duplicate only when the user explicitly wants duplicate solving.
 - If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then run ctfctl interactive next again.
 - Maintain memory.md, evidence.md, attempts.md, next_steps.md, and operator_notes.md for each challenge using ctfctl interactive memo.
@@ -2761,6 +2980,966 @@ def _manifest_root(manifest: Mapping[str, Any], fallback: Path) -> Path:
     return fallback
 
 
+def _effective_triage_category(category: str | None, context: Mapping[str, Any]) -> str:
+    if category:
+        normalized = _playbook_category(category, has_remote=bool(context.get("remote_endpoints")))
+        return normalized if normalized in PLAYBOOK_CATEGORIES else "forensics/misc"
+    guess = context.get("category_guess") if isinstance(context.get("category_guess"), Mapping) else {}
+    normalized = _playbook_category(str(guess.get("category") or ""), has_remote=bool(context.get("remote_endpoints")))
+    return normalized if normalized in PLAYBOOK_CATEGORIES else "forensics/misc"
+
+
+def _triage_file_inventory(context: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    challenge_dir = Path(context["challenge_dir"]).expanduser()
+
+    def add(path: Path, *, role: str, root: Path | None = None, score: int = 0, reasons: Iterable[str] = ()) -> None:
+        expanded = path.expanduser()
+        if not expanded.exists() or not expanded.is_file():
+            return
+        try:
+            key = expanded.resolve().as_posix()
+        except OSError:
+            key = expanded.as_posix()
+        if key in seen:
+            return
+        seen.add(key)
+        base = root.expanduser() if root else challenge_dir
+        try:
+            rel = expanded.relative_to(base).as_posix()
+        except ValueError:
+            rel = expanded.name
+        if is_sensitive_path(rel) or is_sensitive_path(expanded.name):
+            return
+        try:
+            stat = expanded.stat()
+        except OSError:
+            return
+        kind, signature = _triage_file_signature(expanded)
+        rows.append(
+            {
+                "path": rel,
+                "abs_path": str(expanded),
+                "display_path": _display(expanded),
+                "root": _display(base),
+                "role": role,
+                "size": stat.st_size,
+                "suffix": expanded.suffix.lower(),
+                "kind": kind,
+                "signature": signature,
+                "score": score,
+                "reasons": _dedupe_strings(str(reason) for reason in reasons)[:5],
+            }
+        )
+
+    if context.get("brief_path"):
+        add(Path(context["brief_path"]), role="brief", root=challenge_dir, score=60, reasons=["brief"])
+    for path in context.get("manifest_paths") or []:
+        add(Path(path), role="manifest", root=Path(path).parent.parent, score=45, reasons=["manifest"])
+    for path in context.get("scan_paths") or []:
+        add(Path(path), role="manifest", root=Path(path).parent.parent, score=45, reasons=["scan"])
+    for kind in MEMO_KINDS:
+        add(challenge_dir / f"{kind}.md", role=f"memo:{kind}", root=challenge_dir, score=20, reasons=["memo"])
+
+    for entry in context.get("top_files") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        root = _expand_display_path(str(entry.get("root") or ""))
+        rel = str(entry.get("path") or "")
+        if rel:
+            add(root / rel, role="top_file", root=root, score=int(entry.get("score") or 0), reasons=_list_values(entry.get("reasons")))
+
+    for base in context.get("candidate_dirs") or [challenge_dir]:
+        base_path = Path(base).expanduser()
+        for dirname in ("raw", "handout", "extracted"):
+            artifact_root = base_path / dirname
+            if not artifact_root.exists() or not artifact_root.is_dir():
+                continue
+            count = 0
+            for child in sorted(artifact_root.rglob("*")):
+                if child.is_file():
+                    add(child, role=dirname, root=base_path, score=5, reasons=["local artifact"])
+                    count += 1
+                if count >= 250:
+                    break
+    return sorted(rows, key=lambda row: (-int(row.get("score") or 0), str(row.get("role") or ""), str(row.get("path") or "")))[:400]
+
+
+def _triage_file_signature(path: Path) -> tuple[str, str]:
+    data = _read_file_prefix(path, 4096)
+    suffix = path.suffix.lower()
+    if data.startswith(b"\x7fELF"):
+        return "elf", "ELF"
+    if data.startswith(b"MZ"):
+        return "pe", "MZ"
+    if data.startswith(b"\xca\xfe\xba\xbe") or data.startswith(b"\xfe\xed\xfa") or data.startswith(b"\xcf\xfa\xed\xfe"):
+        return "mach-o", "Mach-O"
+    if data.startswith(b"\x00asm"):
+        return "wasm", "WASM"
+    if data.startswith(b"PK\x03\x04"):
+        if suffix == ".apk":
+            return "apk", "ZIP/APK"
+        if suffix in {".jar", ".war"}:
+            return "jar", "ZIP/JAR"
+        return "zip", "ZIP"
+    if data.startswith(b"%PDF"):
+        return "pdf", "PDF"
+    if data.startswith(b"\x89PNG"):
+        return "image", "PNG"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image", "JPEG"
+    if data.startswith(b"SQLite format 3"):
+        return "sqlite", "SQLite"
+    if data.startswith(b"\xd4\xc3\xb2\xa1") or data.startswith(b"\xa1\xb2\xc3\xd4") or data.startswith(b"\x0a\x0d\x0d\x0a"):
+        return "pcap", "PCAP"
+    if suffix in {".py", ".js", ".ts", ".php", ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".html", ".css", ".sql", ".sh"}:
+        return "source", suffix.lstrip(".")
+    if suffix in {".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".log", ".csv"}:
+        return "text", suffix.lstrip(".")
+    if suffix in {".pt", ".pth", ".onnx", ".pkl", ".pickle", ".safetensors", ".h5", ".joblib"}:
+        return "model", suffix.lstrip(".")
+    if data and b"\x00" not in data[:2048]:
+        return "text", "text"
+    return "binary" if data else "unknown", "binary" if data else "empty"
+
+
+def _read_file_prefix(path: Path, limit: int) -> bytes:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(limit)
+    except OSError:
+        return b""
+
+
+def _triage_file_path(row: Mapping[str, Any]) -> Path:
+    return Path(str(row.get("abs_path") or row.get("display_path") or row.get("path") or "")).expanduser()
+
+
+def _run_category_triage_commands(category: str, context: Mapping[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cwd = Path(context["challenge_dir"]).expanduser()
+    primary = _primary_triage_files(category, files)
+    rows: list[dict[str, Any]] = []
+    rows.append(_run_triage_command(["find", ".", "-maxdepth", "4", "-type", "f"], cwd=cwd, timeout=5))
+    if primary:
+        rows.append(_run_triage_command(["file", *[str(path) for path in primary[:12]]], cwd=cwd, timeout=8))
+
+    if category == "web":
+        rows.extend(
+            [
+                _run_triage_command(["rg", "-n", r"route|app\.|router\.|urlpatterns|FastAPI|express|fetch|axios|XMLHttpRequest|<form", "."], cwd=cwd, timeout=8),
+                _run_triage_command(["rg", "-n", r"auth|login|session|jwt|cookie|upload|render|template|sql|sqlite|eval|exec|ssrf|open\(|path", "."], cwd=cwd, timeout=8),
+            ]
+        )
+    elif category == "pwn":
+        target = primary[0] if primary else None
+        if target:
+            rows.extend(
+                [
+                    _run_triage_command(["checksec", f"--file={target}"], cwd=cwd, timeout=8),
+                    _run_triage_command(["readelf", "-h", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["readelf", "-s", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["strings", "-a", "-n", "4", str(target)], cwd=cwd, timeout=8),
+                ]
+            )
+    elif category == "rev":
+        target = primary[0] if primary else None
+        if target:
+            rows.extend(
+                [
+                    _run_triage_command(["readelf", "-h", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["objdump", "-f", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["strings", "-a", "-n", "4", str(target)], cwd=cwd, timeout=8),
+                ]
+            )
+        rows.append(_run_triage_command(["rg", "-n", r"check|verify|flag|key|decrypt|xor|base64|password|serial", "."], cwd=cwd, timeout=8))
+    elif category == "crypto":
+        rows.append(_run_triage_command(["rg", "-n", r"RSA|ECC|ECDSA|AES|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce|curve|sage|Crypto", "."], cwd=cwd, timeout=8))
+    elif category == "forensics/misc":
+        target = primary[0] if primary else None
+        if target:
+            rows.extend(
+                [
+                    _run_triage_command(["exiftool", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["binwalk", str(target)], cwd=cwd, timeout=12),
+                    _run_triage_command(["xxd", "-l", "256", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command(["strings", "-a", "-n", "5", str(target)], cwd=cwd, timeout=8),
+                ]
+            )
+    elif category == "osint":
+        rows.append(_run_triage_command(["rg", "-n", r"https?://|domain|username|handle|coord|latitude|longitude|image|photo|email|@", "."], cwd=cwd, timeout=8))
+    elif category == "ai/ml":
+        rows.extend(
+            [
+                _run_triage_command(["find", ".", "-maxdepth", "5", "-type", "f", "(", "-name", "*.pt", "-o", "-name", "*.pth", "-o", "-name", "*.onnx", "-o", "-name", "*.pkl", "-o", "-name", "*.safetensors", "-o", "-name", "*.json", ")"], cwd=cwd, timeout=8),
+                _run_triage_command(["rg", "-n", r"torch|tensorflow|sklearn|transformers|onnx|pickle|prompt|system|model|dataset|label", "."], cwd=cwd, timeout=8),
+            ]
+        )
+    return rows
+
+
+def _primary_triage_files(category: str, files: list[dict[str, Any]]) -> list[Path]:
+    preferred_kinds = {
+        "pwn": {"elf", "binary"},
+        "rev": {"elf", "pe", "mach-o", "wasm", "apk", "jar", "binary"},
+        "forensics/misc": {"image", "pdf", "pcap", "zip", "binary", "sqlite", "text"},
+        "ai/ml": {"model", "source", "text"},
+    }.get(category, {"source", "text", "binary", "elf", "pe", "wasm", "zip"})
+    result: list[Path] = []
+    for row in files:
+        if str(row.get("role") or "").startswith("memo:"):
+            continue
+        if str(row.get("kind") or "") not in preferred_kinds:
+            continue
+        path = _triage_file_path(row)
+        if path.exists() and path.is_file():
+            result.append(path)
+        if len(result) >= 16:
+            break
+    return result
+
+
+def _run_triage_command(command: list[str], *, cwd: Path, timeout: int) -> dict[str, Any]:
+    display = " ".join(shlex.quote(part) for part in command)
+    if not command or not shutil.which(command[0]):
+        return {"command": display, "status": "skipped", "reason": "tool_missing", "returncode": None, "stdout": "", "stderr": ""}
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+        status = "ok" if completed.returncode == 0 else "nonzero"
+        return {
+            "command": display,
+            "status": status,
+            "returncode": completed.returncode,
+            "stdout": _target_summary(completed.stdout, 6000),
+            "stderr": _target_summary(completed.stderr, 3000),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "command": display,
+            "status": "timeout",
+            "returncode": None,
+            "stdout": _target_summary(str(exc.stdout or ""), 2000),
+            "stderr": _target_summary(str(exc.stderr or ""), 2000),
+        }
+    except OSError as exc:
+        return {"command": display, "status": "error", "reason": redact_text(str(exc)), "returncode": None, "stdout": "", "stderr": ""}
+
+
+def _category_triage_findings(
+    category: str,
+    item: Mapping[str, Any],
+    context: Mapping[str, Any],
+    files: list[dict[str, Any]],
+    command_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = [
+        _finding("category", "Category guess", f"{category} from declared/manifest/local evidence"),
+        _finding("files", "Local file inventory", f"{len(files)} local context/artifact files indexed"),
+    ]
+    top = [str(row.get("display_path") or row.get("path") or "") for row in files if not str(row.get("role") or "").startswith("memo:")][:6]
+    if top:
+        findings.append(_finding("files", "Top local files", "; ".join(top)))
+    if context.get("remote_endpoints"):
+        findings.append(_finding("remote", "Remote endpoints in local metadata", "; ".join(str(value) for value in context["remote_endpoints"][:6])))
+
+    if category == "web":
+        findings.extend(_web_triage_findings(files))
+    elif category == "pwn":
+        findings.extend(_pwn_triage_findings(files, context, command_rows))
+    elif category == "rev":
+        findings.extend(_rev_triage_findings(files, command_rows))
+    elif category == "crypto":
+        findings.extend(_crypto_triage_findings(files))
+    elif category == "forensics/misc":
+        findings.extend(_forensics_triage_findings(files, command_rows))
+    elif category == "osint":
+        findings.extend(_osint_triage_findings(files))
+    elif category == "ai/ml":
+        findings.extend(_aiml_triage_findings(files))
+    if len(findings) == 2:
+        findings.append(_finding("triage", "No category-specific signal found", "Inspect brief and top files manually, then update next_steps."))
+    return findings[:80]
+
+
+def _finding(kind: str, title: str, detail: str, *, path: str = "", evidence: str = "") -> dict[str, Any]:
+    row = {"type": kind, "title": title, "detail": _target_summary(detail, 800)}
+    if path:
+        row["path"] = path
+    if evidence:
+        row["evidence"] = _target_summary(evidence, 1200)
+    return row
+
+
+def _web_triage_findings(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    source = [row for row in files if str(row.get("suffix") or "") in {".py", ".js", ".ts", ".php", ".rb", ".go", ".java", ".html", ".jsx", ".tsx"}]
+    if source:
+        findings.append(_finding("web_source", "Web/source files", "; ".join(str(row.get("path") or "") for row in source[:12])))
+    route_matches = _scan_text_matches(files, [("route", r"@.*route|app\.(?:get|post|put|delete|route)|router\.(?:get|post|put|delete)|urlpatterns|FastAPI|express")], max_matches=20)
+    form_matches = _scan_text_matches(files, [("form", r"<form\b|method=[\"']?(?:post|get)|action=[\"']?")], max_matches=20)
+    sink_matches = _scan_text_matches(files, [("sink", r"auth|login|session|jwt|cookie|upload|render_template|template|sql|sqlite|eval\(|exec\(|requests\.(?:get|post)|open\(|send_file|path")], max_matches=30)
+    api_matches = _scan_text_matches(files, [("api", r"/api/|fetch\(|axios\.|XMLHttpRequest|graphql|REST")], max_matches=20)
+    for label, matches in (("Routes", route_matches), ("Forms", form_matches), ("API/client endpoints", api_matches), ("Likely bug sinks", sink_matches)):
+        if matches:
+            findings.append(_finding("web", label, _match_summary(matches), path=str(matches[0].get("path") or ""), evidence=str(matches[0].get("line_text") or "")))
+    js_bundles = [row for row in files if str(row.get("suffix") or "") == ".js" and re.search(r"bundle|chunk|main|static|assets", str(row.get("path") or ""), re.IGNORECASE)]
+    if js_bundles:
+        findings.append(_finding("web_js", "JS bundles", "; ".join(str(row.get("path") or "") for row in js_bundles[:10])))
+    return findings
+
+
+def _pwn_triage_findings(files: list[dict[str, Any]], context: Mapping[str, Any], command_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    binaries = [row for row in files if str(row.get("kind") or "") in {"elf", "binary"}]
+    if binaries:
+        findings.append(_finding("pwn_binary", "Primary binary candidates", "; ".join(str(row.get("display_path") or "") for row in binaries[:8])))
+    docker_hints = [row for row in files if Path(str(row.get("path") or "")).name.lower() in {"dockerfile", "docker-compose.yml", "docker-compose.yaml"}]
+    libc_hints = [row for row in files if re.search(r"libc|ld-linux|ld-musl", str(row.get("path") or ""), re.IGNORECASE)]
+    if docker_hints or libc_hints:
+        findings.append(_finding("pwn_env", "Docker/libc hints", "; ".join(str(row.get("path") or "") for row in [*docker_hints, *libc_hints][:12])))
+    checksec = _command_output(command_rows, "checksec")
+    if checksec:
+        findings.append(_finding("pwn_checksec", "checksec output", checksec[:900]))
+    readelf = _command_output(command_rows, "readelf -h")
+    if readelf:
+        findings.append(_finding("pwn_readelf", "ELF header", readelf[:900]))
+    if context.get("remote_endpoints"):
+        findings.append(_finding("pwn_remote", "Remote service hint", "; ".join(str(value) for value in context["remote_endpoints"][:4])))
+    return findings
+
+
+def _rev_triage_findings(files: list[dict[str, Any]], command_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    artifacts = [row for row in files if str(row.get("kind") or "") in {"elf", "pe", "mach-o", "wasm", "apk", "jar", "binary"}]
+    if artifacts:
+        formats = _dedupe_strings(str(row.get("kind") or "") for row in artifacts)
+        findings.append(_finding("rev_artifact", "Reversing artifact format", f"formats={', '.join(formats)} files={'; '.join(str(row.get('display_path') or '') for row in artifacts[:8])}"))
+    string_hits = _scan_text_matches(files, [("rev_marker", r"check|verify|flag|key|decrypt|xor|base64|password|serial")], max_matches=30)
+    strings_output = _command_output(command_rows, "strings")
+    if string_hits:
+        findings.append(_finding("rev_strings", "Interesting source/text markers", _match_summary(string_hits), path=str(string_hits[0].get("path") or ""), evidence=str(string_hits[0].get("line_text") or "")))
+    elif strings_output:
+        findings.append(_finding("rev_strings", "strings output sample", strings_output[:1200]))
+    readelf = _command_output(command_rows, "readelf -h")
+    if readelf:
+        findings.append(_finding("rev_readelf", "Binary header", readelf[:900]))
+    return findings
+
+
+def _crypto_triage_findings(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    param_matches = _scan_text_matches(
+        files,
+        [
+            ("rsa_param", r"\b(?:n|e|c|p|q|phi|modulus|ciphertext|ct)\s*[:=]\s*(?:0x[0-9a-fA-F]+|\d{6,}|[A-Za-z0-9+/=]{16,})"),
+            ("crypto_primitive", r"RSA|ECC|ECDSA|AES|CBC|CTR|GCM|nonce|seed|random|curve|sage|Crypto|openssl"),
+        ],
+        max_matches=50,
+    )
+    if param_matches:
+        findings.append(_finding("crypto_params", "Crypto parameters/primitives", _match_summary(param_matches), path=str(param_matches[0].get("path") or ""), evidence=str(param_matches[0].get("line_text") or "")))
+    data_files = [row for row in files if str(row.get("suffix") or "") in {".txt", ".json", ".sage", ".py", ".pem", ".pub"}]
+    if data_files:
+        findings.append(_finding("crypto_files", "Likely crypto data/source files", "; ".join(str(row.get("display_path") or "") for row in data_files[:10])))
+    return findings
+
+
+def _forensics_triage_findings(files: list[dict[str, Any]], command_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    formats = _dedupe_strings(str(row.get("kind") or "") for row in files if not str(row.get("role") or "").startswith("memo:"))
+    if formats:
+        findings.append(_finding("forensics_format", "File format spread", ", ".join(formats[:12])))
+    for tool in ("exiftool", "binwalk", "xxd", "strings"):
+        output = _command_output(command_rows, tool)
+        if output:
+            findings.append(_finding("forensics_tool", f"{tool} output", output[:1000]))
+    suspicious = [row for row in files if str(row.get("kind") or "") in {"zip", "pcap", "sqlite", "image", "pdf"}]
+    if suspicious:
+        findings.append(_finding("forensics_artifacts", "Carving/metadata candidates", "; ".join(str(row.get("display_path") or "") for row in suspicious[:10])))
+    return findings
+
+
+def _osint_triage_findings(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    matches = _scan_text_matches(
+        files,
+        [("local_identifier", r"https?://[^\s)>'\"]+|@[A-Za-z0-9_.-]{3,}|\b(?:lat|lon|latitude|longitude|coord)\b|[A-Za-z0-9.-]+\.[A-Za-z]{2,}")],
+        max_matches=40,
+    )
+    if not matches:
+        return []
+    return [_finding("osint_local", "Local-only OSINT identifiers", _match_summary(matches), path=str(matches[0].get("path") or ""), evidence=str(matches[0].get("line_text") or ""))]
+
+
+def _aiml_triage_findings(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    models = [row for row in files if str(row.get("kind") or "") == "model"]
+    if models:
+        findings.append(_finding("aiml_model", "Model artifacts", "; ".join(str(row.get("display_path") or "") for row in models[:12])))
+    matches = _scan_text_matches(files, [("aiml_code", r"torch|tensorflow|sklearn|transformers|onnx|pickle|prompt|system|dataset|label|logits|softmax")], max_matches=40)
+    if matches:
+        findings.append(_finding("aiml_code", "ML/inference code hints", _match_summary(matches), path=str(matches[0].get("path") or ""), evidence=str(matches[0].get("line_text") or "")))
+    return findings
+
+
+def _scan_text_matches(files: list[dict[str, Any]], patterns: list[tuple[str, str]], *, max_matches: int) -> list[dict[str, Any]]:
+    compiled = [(label, re.compile(pattern, re.IGNORECASE)) for label, pattern in patterns]
+    matches: list[dict[str, Any]] = []
+    for row in files:
+        path = _triage_file_path(row)
+        if str(row.get("role") or "").startswith("memo:"):
+            continue
+        text = _read_small_text_file(path)
+        if not text:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            for label, regex in compiled:
+                if not regex.search(stripped):
+                    continue
+                matches.append(
+                    {
+                        "pattern": label,
+                        "path": str(row.get("display_path") or row.get("path") or ""),
+                        "line": line_no,
+                        "line_text": _target_summary(stripped, 300),
+                    }
+                )
+                break
+            if len(matches) >= max_matches:
+                return matches
+    return matches
+
+
+def _read_small_text_file(path: Path) -> str:
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return ""
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if b"\x00" in data[:4096]:
+        return ""
+    return _target_safe_text(data.decode("utf-8", errors="replace"))
+
+
+def _match_summary(matches: list[dict[str, Any]]) -> str:
+    parts = []
+    for match in matches[:8]:
+        parts.append(f"{match.get('path')}:{match.get('line')} {match.get('pattern')} {match.get('line_text')}")
+    suffix = f"; +{len(matches) - 8} more" if len(matches) > 8 else ""
+    return "; ".join(parts) + suffix
+
+
+def _command_output(command_rows: list[dict[str, Any]], marker: str) -> str:
+    for row in command_rows:
+        if marker in str(row.get("command") or "") and row.get("stdout"):
+            return str(row.get("stdout") or "")
+    return ""
+
+
+def _triage_next_steps(category: str, findings: list[dict[str, Any]], context: Mapping[str, Any]) -> list[str]:
+    steps = {
+        "web": [
+            "Map routes, auth/session state, forms, and API inputs from the files called out in triage.",
+            "Run the app locally if possible, then test only the highest-signal sinks first.",
+            "Fill solve_web.py with a reproducible requests.Session proof path.",
+        ],
+        "pwn": [
+            "Confirm protections and architecture, then reproduce a local crash with the primary binary.",
+            "Derive offset/primitive and identify matching libc/ld or Docker runtime before remote attempts.",
+            "Fill exploit.py with local/remote switches and save verification output locally.",
+        ],
+        "rev": [
+            "Open the primary artifact in a disassembler or objdump and locate the validation routine.",
+            "Extract constants/transform logic into solve_rev.py and verify candidate generation locally.",
+            "Use z3 only after the constraints are explicit enough to model.",
+        ],
+        "crypto": [
+            "Normalize all parameters/ciphertexts into solve_crypto.py.",
+            "Identify the primitive and weakness before brute force; bound any search space explicitly.",
+            "Verify decrypt/forge output locally before submission.",
+        ],
+        "forensics/misc": [
+            "Run focused metadata/carving commands on the primary artifact and save extracted files locally.",
+            "Try format-specific tools only after file/strings/binwalk/exif evidence points there.",
+            "Record decoded candidate derivation in evidence.md before submit.",
+        ],
+        "osint": [
+            "Work only from local identifiers and official sources; do not search current-event writeups.",
+            "Record each query path and why it follows from local evidence.",
+            "Stop if the remaining path requires guesswork or account-gated external browsing.",
+        ],
+        "ai/ml": [
+            "Identify model format, inference entrypoint, and dataset/label mapping.",
+            "Build a minimal local inference or inspection harness before adversarial attempts.",
+            "Avoid long training unless a small bounded experiment is justified by local evidence.",
+        ],
+    }.get(category, [])
+    if not findings or any("No category-specific signal" in str(row.get("title") or "") for row in findings):
+        steps.insert(0, "Inspect brief.md and the top local files manually; add any concrete signal to evidence.md.")
+    if not context.get("remote_endpoints") and category in {"web", "pwn"}:
+        steps.append("Find or record service connection info before remote testing.")
+    return _dedupe_strings(steps)[:5]
+
+
+def _render_triage_summary(
+    contest_id: str,
+    item: Mapping[str, Any],
+    context: Mapping[str, Any],
+    category: str,
+    files: list[dict[str, Any]],
+    command_rows: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    next_steps: list[str],
+    *,
+    target_pack_path: str,
+    started_at: str,
+) -> str:
+    lines = [
+        f"# Auto Triage: {_md(str(item.get('canonical_name') or item.get('name') or item.get('challenge_id') or 'challenge'))}",
+        "",
+        f"- generated_at: {utc_now()}",
+        f"- started_at: {_md(started_at)}",
+        f"- contest_id: {_md(contest_id)}",
+        f"- challenge_id: {_md(str(item.get('challenge_id') or ''))}",
+        f"- category: {_md(category)}",
+        f"- challenge_path: {_md(_display(Path(context['challenge_dir'])))}",
+        f"- target_pack_path: {_md(target_pack_path or 'missing')}",
+        f"- brief_path: {_md(_display(context['brief_path']) if context.get('brief_path') else 'missing')}",
+        "",
+        "## Top Files",
+    ]
+    artifacts = [row for row in files if not str(row.get("role") or "").startswith("memo:")]
+    if artifacts:
+        for row in artifacts[:12]:
+            lines.append(f"- {_md(str(row.get('display_path') or row.get('path') or ''))} [{_md(str(row.get('kind') or 'unknown'))}] size={int(row.get('size') or 0)}")
+    else:
+        lines.append("- none detected")
+    lines.extend(["", "## Commands"])
+    for row in command_rows[:20]:
+        status = str(row.get("status") or "")
+        reason = f" reason={_md(str(row.get('reason') or ''))}" if row.get("reason") else ""
+        lines.append(f"- `{row.get('command')}` status={_md(status)}{reason}")
+    lines.extend(["", "## Findings"])
+    for row in findings[:30]:
+        detail = str(row.get("detail") or "")
+        path = f" ({_md(str(row.get('path') or ''))})" if row.get("path") else ""
+        lines.append(f"- {_md(str(row.get('title') or row.get('type') or 'finding'))}{path}: {_md(detail)}")
+    lines.extend(["", "## Next Steps"])
+    lines.extend(f"- {_md(step)}" for step in next_steps)
+    return "\n".join(lines) + "\n"
+
+
+def _append_triage_memos(
+    challenge_dir: Path,
+    *,
+    category: str,
+    summary_path: Path,
+    files_path: Path,
+    commands_path: Path,
+    findings_path: Path,
+    findings: list[dict[str, Any]],
+    next_steps: list[str],
+) -> None:
+    timestamp = utc_now()
+    _ensure_challenge_memos(challenge_dir)
+    _append_text(challenge_dir / "memory.md", f"\n- auto_triage: category={category} findings={len(findings)} summary={_display(summary_path)} ({timestamp})\n")
+    _append_text(
+        challenge_dir / "evidence.md",
+        "\n".join(
+            [
+                f"\n## Auto Triage {timestamp}",
+                f"- category: {category}",
+                f"- summary: {_display(summary_path)}",
+                f"- files: {_display(files_path)}",
+                f"- commands: {_display(commands_path)}",
+                f"- findings: {_display(findings_path)}",
+                *[f"- {row.get('title')}: {row.get('detail')}" for row in findings[:6]],
+                "",
+            ]
+        ),
+    )
+    _append_text(challenge_dir / "attempts.md", f"\n- auto_triage: ran local category triage for {category}; command log at {_display(commands_path)} ({timestamp})\n")
+    _append_text(challenge_dir / "next_steps.md", "\n".join(["", f"## Auto Triage Next Steps {timestamp}", *[f"- {step}" for step in next_steps], ""]))
+    _append_text(challenge_dir / "operator_notes.md", f"\n- auto_triage_complete: {_display(summary_path)} ({timestamp}); local artifacts only, no external CTF access.\n")
+
+
+def _append_starter_memos(challenge_dir: Path, *, starter_path: Path, category: str, created: bool) -> None:
+    timestamp = utc_now()
+    verb = "created" if created else "preserved"
+    _ensure_challenge_memos(challenge_dir)
+    _append_text(challenge_dir / "memory.md", f"\n- starter_{verb}: {category} starter at {_display(starter_path)} ({timestamp})\n")
+    _append_text(challenge_dir / "next_steps.md", f"\n- Open {_display(starter_path)} and replace TODO hooks with the verified solve path.\n")
+    _append_text(challenge_dir / "operator_notes.md", f"\n- starter_{verb}: {_display(starter_path)} ({category}, {timestamp})\n")
+
+
+def _save_challenge_triage_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
+    _save_challenge_local_metadata(root, board, challenge_id, "challenge_triage_metadata", "triage_metadata", metadata)
+
+
+def _save_challenge_solver_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
+    _save_challenge_local_metadata(root, board, challenge_id, "challenge_solver_metadata", "solver_metadata", metadata)
+
+
+def _save_challenge_local_metadata(
+    root: Path,
+    board: dict[str, Any],
+    challenge_id: str,
+    operator_key: str,
+    board_key: str,
+    metadata: Mapping[str, Any],
+) -> None:
+    normalized = _redact_object(dict(metadata))
+    config_path = root / "operator.json"
+    config = _operator_config(root)
+    configured = dict(config.get(operator_key) or {}) if isinstance(config.get(operator_key), Mapping) else {}
+    configured[challenge_id] = normalized
+    config[operator_key] = configured
+    config["updated_at"] = utc_now()
+    _write_json(config_path, config)
+
+    board_meta = dict(board.get(board_key) or {}) if isinstance(board.get(board_key), Mapping) else {}
+    board_meta[challenge_id] = normalized
+    board[board_key] = board_meta
+    item = _find_challenge(board, challenge_id)
+    if isinstance(item, dict):
+        item[board_key] = normalized
+    board["updated_at"] = utc_now()
+    _write_board(root, board)
+    _write_board_md(root, board)
+
+
+def _starter_filename(category: str) -> str:
+    return {
+        "web": "solve_web.py",
+        "pwn": "exploit.py",
+        "rev": "solve_rev.py",
+        "crypto": "solve_crypto.py",
+        "forensics/misc": "solve_misc.py",
+        "osint": "solve_misc.py",
+        "ai/ml": "solve_ai_ml.py",
+    }.get(category, "solve_misc.py")
+
+
+def _starter_source(category: str, contest_id: str, item: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+    files = _triage_file_inventory(context)
+    data = _starter_context_data(contest_id, item, context, files, category=category)
+    if category == "web":
+        return _starter_web_source(data)
+    if category == "pwn":
+        return _starter_pwn_source(data)
+    if category == "rev":
+        return _starter_rev_source(data)
+    if category == "crypto":
+        return _starter_crypto_source(data)
+    if category == "ai/ml":
+        return _starter_aiml_source(data)
+    return _starter_misc_source(data, category=category)
+
+
+def _starter_context_data(
+    contest_id: str,
+    item: Mapping[str, Any],
+    context: Mapping[str, Any],
+    files: list[dict[str, Any]],
+    *,
+    category: str,
+) -> dict[str, Any]:
+    challenge_dir = _absolute_path(Path(context["challenge_dir"]))
+    brief = _absolute_path(Path(context["brief_path"])) if context.get("brief_path") else ""
+    raw_dirs = [_absolute_path(Path(path)) for path in context.get("raw_dirs") or []]
+    extracted_dirs = [_absolute_path(Path(path)) for path in context.get("extracted_dirs") or []]
+    top_files = [_absolute_path(_triage_file_path(row)) for row in files if not str(row.get("role") or "").startswith("memo:")][:16]
+    primary_files = _primary_triage_files(category, files)
+    primary = _absolute_path(primary_files[0]) if primary_files else ""
+    return {
+        "contest_id": contest_id,
+        "challenge_id": str(item.get("challenge_id") or ""),
+        "name": str(item.get("canonical_name") or item.get("name") or item.get("challenge_id") or ""),
+        "category": category,
+        "challenge_dir": challenge_dir,
+        "brief_path": brief,
+        "raw_dirs": raw_dirs,
+        "extracted_dirs": extracted_dirs,
+        "top_files": top_files,
+        "primary_file": primary,
+        "remote_endpoints": [str(value) for value in context.get("remote_endpoints") or []],
+    }
+
+
+def _absolute_path(path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser())
+
+
+def _py_json(value: Any) -> str:
+    return json.dumps(value, indent=4, sort_keys=True)
+
+
+def _starter_header(data: Mapping[str, Any]) -> str:
+    return f'''from __future__ import annotations
+
+from pathlib import Path
+
+
+CONTEST_ID = {json.dumps(data["contest_id"])}
+CHALLENGE_ID = {json.dumps(data["challenge_id"])}
+CHALLENGE_NAME = {json.dumps(data["name"])}
+CHALLENGE_DIR = Path({json.dumps(data["challenge_dir"])})
+BRIEF_PATH = Path({json.dumps(data["brief_path"])}) if {json.dumps(bool(data["brief_path"]))} else None
+RAW_DIRS = [Path(item) for item in {_py_json(data["raw_dirs"])}]
+EXTRACTED_DIRS = [Path(item) for item in {_py_json(data["extracted_dirs"])}]
+TOP_FILES = [Path(item) for item in {_py_json(data["top_files"])}]
+REMOTE_ENDPOINTS = {_py_json(data["remote_endpoints"])}
+PRIMARY_FILE = Path({json.dumps(data["primary_file"])}) if {json.dumps(bool(data["primary_file"]))} else None
+
+'''
+
+
+def _starter_web_source(data: Mapping[str, Any]) -> str:
+    return _starter_header(data) + '''import re
+import sys
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - starter guidance.
+    requests = None
+
+
+FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,32}\\{[^{}\\s]+\\}")
+
+
+def read_text(path: Path, limit: int = 20000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[:limit]
+    except OSError:
+        return ""
+
+
+def candidate_base_url() -> str:
+    for endpoint in REMOTE_ENDPOINTS:
+        if endpoint.startswith(("http://", "https://")):
+            return endpoint.rstrip("/")
+    return ""
+
+
+def main() -> int:
+    if requests is None:
+        print("Install requests or port this skeleton to urllib.", file=sys.stderr)
+        return 2
+    session = requests.Session()
+    base_url = candidate_base_url()
+    if not base_url:
+        print("TODO: set base_url from challenge statement or local service.", file=sys.stderr)
+        return 1
+
+    # TODO: map route/auth state from TOP_FILES and replace this probe.
+    response = session.get(base_url, timeout=10)
+    print(response.status_code)
+    match = FLAG_RE.search(response.text)
+    if match:
+        print(match.group(0))
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _starter_pwn_source(data: Mapping[str, Any]) -> str:
+    return _starter_header(data) + '''from pwn import *  # type: ignore
+
+
+context.log_level = "info"
+if PRIMARY_FILE and PRIMARY_FILE.exists():
+    elf = ELF(str(PRIMARY_FILE), checksec=False)
+    context.binary = elf
+else:
+    elf = None
+
+
+def start():
+    if args.REMOTE:
+        # TODO: replace with host/port from REMOTE_ENDPOINTS.
+        host = args.HOST or "127.0.0.1"
+        port = int(args.PORT or 31337)
+        return remote(host, port)
+    if not PRIMARY_FILE:
+        raise SystemExit("Primary binary missing; inspect TOP_FILES.")
+    return process([str(PRIMARY_FILE)])
+
+
+def build_payload() -> bytes:
+    # TODO: replace with crash offset, primitive, ROP, or shellcode.
+    return b"A" * 64
+
+
+def main() -> None:
+    io = start()
+    io.sendline(build_payload())
+    io.interactive()
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _starter_rev_source(data: Mapping[str, Any]) -> str:
+    return _starter_header(data) + '''import re
+import subprocess
+import sys
+
+try:
+    import z3  # type: ignore
+except ImportError:  # pragma: no cover - optional starter dependency.
+    z3 = None
+
+
+FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,32}\\{[^{}\\s]+\\}")
+
+
+def run_candidate(candidate: str) -> subprocess.CompletedProcess[str] | None:
+    if not PRIMARY_FILE or not PRIMARY_FILE.exists():
+        return None
+    return subprocess.run([str(PRIMARY_FILE), candidate], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, check=False)
+
+
+def solve_with_z3() -> str:
+    if z3 is None:
+        return ""
+    # TODO: translate validation constraints after reversing the check routine.
+    return ""
+
+
+def main() -> int:
+    candidate = solve_with_z3()
+    if candidate:
+        print(candidate)
+        return 0
+    print(f"TODO: reverse {PRIMARY_FILE or TOP_FILES[:1]} and implement solver", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _starter_crypto_source(data: Mapping[str, Any]) -> str:
+    return _starter_header(data) + '''import re
+from pathlib import Path
+
+
+INT_RE = re.compile(r"\\b(?P<name>n|e|c|p|q|phi|modulus|ciphertext|ct)\\s*[:=]\\s*(?P<value>0x[0-9a-fA-F]+|\\d+)\\b")
+
+
+def read_texts() -> str:
+    chunks: list[str] = []
+    for path in TOP_FILES:
+        if path.is_file() and path.stat().st_size <= 1024 * 1024:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\\n".join(chunks)
+
+
+def parse_ints(text: str) -> dict[str, int]:
+    params: dict[str, int] = {}
+    for match in INT_RE.finditer(text):
+        value = match.group("value")
+        params[match.group("name")] = int(value, 16) if value.startswith("0x") else int(value)
+    return params
+
+
+def solve(params: dict[str, int]) -> bytes:
+    # TODO: identify the primitive/weakness and return plaintext or forged token bytes.
+    raise NotImplementedError(params)
+
+
+def main() -> int:
+    params = parse_ints(read_texts())
+    print(f"parsed params: {sorted(params)}")
+    result = solve(params)
+    print(result.decode("utf-8", errors="replace"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _starter_misc_source(data: Mapping[str, Any], *, category: str) -> str:
+    return _starter_header(data) + f'''import subprocess
+from pathlib import Path
+
+
+CATEGORY = {json.dumps(category)}
+
+
+def run_tool(argv: list[str]) -> str:
+    completed = subprocess.run(argv, cwd=CHALLENGE_DIR, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+    return completed.stdout + completed.stderr
+
+
+def carve_bytes(path: Path, needle: bytes) -> int:
+    data = path.read_bytes()
+    return data.find(needle)
+
+
+def main() -> int:
+    primary = PRIMARY_FILE or (TOP_FILES[0] if TOP_FILES else None)
+    if not primary:
+        print("No primary local artifact found; inspect challenge directory.")
+        return 1
+    print(f"primary={{primary}} size={{primary.stat().st_size}}")
+    # TODO: run category-specific carving/metadata/decoding based on triage evidence.
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _starter_aiml_source(data: Mapping[str, Any]) -> str:
+    return _starter_header(data) + '''from pathlib import Path
+
+
+MODEL_SUFFIXES = {".pt", ".pth", ".onnx", ".pkl", ".pickle", ".safetensors", ".h5", ".joblib"}
+
+
+def model_files() -> list[Path]:
+    return [path for path in TOP_FILES if path.suffix.lower() in MODEL_SUFFIXES]
+
+
+def main() -> int:
+    models = model_files()
+    print(f"models={models}")
+    # TODO: inspect model format, reconstruct inference path, and generate candidate/adversarial input.
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
 def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mapping[str, Any], *, agent: str | None) -> str:
     category_guess = context["category_guess"]
     playbook = _category_playbook(str(category_guess["category"]))
@@ -3811,6 +4990,14 @@ def _append_jsonl(path: Path, data: Mapping[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(redact_text(json.dumps(_redact_object(dict(data)), sort_keys=True)))
         fh.write("\n")
+
+
+def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(redact_text(json.dumps(_redact_object(dict(row)), sort_keys=True)))
+            fh.write("\n")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

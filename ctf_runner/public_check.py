@@ -225,6 +225,9 @@ def run_public_check(
         "interactive_prompt": "./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1",
         "interactive_next": "./scripts/ctfctl interactive next --contest-id release-interactive-smoke --agent smoke-1 --dry-run --json",
         "interactive_target_pack": "./scripts/ctfctl interactive target-pack --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",
+        "interactive_triage": "./scripts/ctfctl interactive triage --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",
+        "interactive_starter": "./scripts/ctfctl interactive starter --contest-id release-interactive-smoke --challenge-id <id> --json",
+        "interactive_prepare_target": "./scripts/ctfctl interactive prepare-target --contest-id release-interactive-smoke --agent smoke-1 --challenge-id <id> --json",
         "interactive_brief": "./scripts/ctfctl interactive brief --contest-id release-interactive-smoke --challenge-id <id> --json",
     }
     legacy_advanced_test_commands = {

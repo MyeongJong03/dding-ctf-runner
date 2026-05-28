@@ -75,12 +75,15 @@ from .interactive import (
     metrics_report as interactive_metrics_report,
     metrics_summary as interactive_metrics_summary,
     next_challenge as interactive_next_challenge,
+    prepare_target as interactive_prepare_target,
     release_claim as interactive_release_claim,
     solver_prompt as interactive_solver_prompt,
+    starter_challenge as interactive_starter_challenge,
     submit_config as interactive_submit_config,
     submit_flag_file as interactive_submit_flag_file,
     sync_operator as interactive_sync_operator,
     target_pack as interactive_target_pack,
+    triage_challenge as interactive_triage_challenge,
     upload_submit as interactive_upload_submit,
     writeup_challenge as interactive_writeup_challenge,
 )
@@ -366,6 +369,36 @@ def _cmd_interactive_target_pack(args: argparse.Namespace) -> int:
             print(redact_text(path.read_text(encoding="utf-8", errors="replace")))
         else:
             _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_triage(args: argparse.Namespace) -> int:
+    data = interactive_triage_challenge(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        agent=args.agent,
+        category=args.category,
+    )
+    if args.json:
+        _print_json(data)
+    else:
+        if data.get("status") == "ok":
+            path = Path(str(data.get("triage_summary_path") or "").replace("~", str(Path.home()), 1))
+            print(redact_text(path.read_text(encoding="utf-8", errors="replace")))
+        else:
+            _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_starter(args: argparse.Namespace) -> int:
+    data = interactive_starter_challenge(args.contest_id, challenge_id=args.challenge_id, category=args.category)
+    _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_prepare_target(args: argparse.Namespace) -> int:
+    data = interactive_prepare_target(args.contest_id, agent=args.agent, challenge_id=args.challenge_id)
+    _print_json(data)
     return 0 if data.get("status") == "ok" else 1
 
 
@@ -2139,6 +2172,25 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_target_pack.add_argument("--agent")
     interactive_target_pack.add_argument("--json", action="store_true")
     interactive_target_pack.set_defaults(func=_cmd_interactive_target_pack)
+    interactive_triage = interactive_sub.add_parser("triage")
+    interactive_triage.add_argument("--contest-id", required=True)
+    interactive_triage.add_argument("--challenge-id", required=True)
+    interactive_triage.add_argument("--agent")
+    interactive_triage.add_argument("--category")
+    interactive_triage.add_argument("--json", action="store_true")
+    interactive_triage.set_defaults(func=_cmd_interactive_triage)
+    interactive_starter = interactive_sub.add_parser("starter")
+    interactive_starter.add_argument("--contest-id", required=True)
+    interactive_starter.add_argument("--challenge-id", required=True)
+    interactive_starter.add_argument("--category")
+    interactive_starter.add_argument("--json", action="store_true")
+    interactive_starter.set_defaults(func=_cmd_interactive_starter)
+    interactive_prepare_target = interactive_sub.add_parser("prepare-target")
+    interactive_prepare_target.add_argument("--contest-id", required=True)
+    interactive_prepare_target.add_argument("--agent", required=True)
+    interactive_prepare_target.add_argument("--challenge-id")
+    interactive_prepare_target.add_argument("--json", action="store_true")
+    interactive_prepare_target.set_defaults(func=_cmd_interactive_prepare_target)
     interactive_brief = interactive_sub.add_parser("brief")
     interactive_brief.add_argument("--contest-id", required=True)
     interactive_brief.add_argument("--challenge-id", required=True)
