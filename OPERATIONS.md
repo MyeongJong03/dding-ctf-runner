@@ -84,8 +84,11 @@ ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-
 Submit upload artifact:
 
 ```bash
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
 ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
 ```
+
+For rfc1149b-like wasm/file challenges, keep the built artifact local and upload only through `upload-submit`. The command blocks if no official endpoint metadata exists or if the endpoint is outside the profile `base_url` origin. Local records include artifact SHA-256, size, timestamp, response status, and active status.
 
 Writeups are accepted-only:
 

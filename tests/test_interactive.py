@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ctf_runner.cli import main
@@ -123,6 +125,204 @@ def test_submit_accepted_updates_solved_without_raw_flag(tmp_path: Path, monkeyp
     solved = (tmp_path / "contests" / "demo" / "operator" / "solved.jsonl").read_text(encoding="utf-8")
     assert "accepted" in solved
     assert raw_flag not in solved
+
+
+def test_upload_submit_blocks_without_endpoint_or_config_and_records_safely(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    artifact = tmp_path / "solution.wasm"
+    raw_marker = "TOKEN_SYNTHETIC_ARTIFACT_MARKER"
+    artifact.write_bytes(b"\x00asm" + raw_marker.encode("ascii"))
+
+    result = _run_json_fail(
+        [
+            "interactive",
+            "upload-submit",
+            "--contest-id",
+            "demo",
+            "--challenge-id",
+            "birdhouse",
+            "--artifact",
+            str(artifact),
+            "--confirm",
+            "--json",
+        ]
+    )
+
+    root = tmp_path / "contests" / "demo" / "operator"
+    submissions = (root / "submissions.jsonl").read_text(encoding="utf-8")
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "official_upload_endpoint_metadata_missing"
+    assert result["artifact"]["sha256"]
+    assert raw_marker not in submissions
+    assert "artifact_submit_planned" in events
+    assert "artifact_submit_blocked" in events
+
+
+def test_submit_config_saves_artifact_upload_metadata(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+
+    result = _run_json(
+        [
+            "interactive",
+            "submit-config",
+            "--contest-id",
+            "demo",
+            "--challenge-id",
+            "birdhouse",
+            "--submit-type",
+            "artifact_upload",
+            "--endpoint",
+            "https://example.invalid/submit",
+            "--field-name",
+            "file",
+            "--status-url",
+            "https://example.invalid/status/birdhouse",
+            "--json",
+        ]
+    )
+
+    root = tmp_path / "contests" / "demo" / "operator"
+    operator = json.loads((root / "operator.json").read_text(encoding="utf-8"))
+    board = json.loads((root / "board.json").read_text(encoding="utf-8"))
+    metadata = operator["challenge_submit_metadata"]["birdhouse"]
+
+    assert result["status"] == "ok"
+    assert metadata["submit_type"] == "artifact_upload"
+    assert metadata["endpoint"] == "https://example.invalid/submit"
+    assert metadata["field_name"] == "file"
+    assert board["submit_metadata"]["birdhouse"]["submit_type"] == "artifact_upload"
+    assert board["challenges"][0]["submit_metadata"]["endpoint"] == "https://example.invalid/submit"
+
+
+def test_upload_submit_fake_local_endpoint_records_acceptance_and_public_safe_snapshot(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    raw_secret_marker = "TOKEN_SYNTHETIC_RESPONSE_MARKER"
+    with ArtifactUploadServer(raw_secret_marker=raw_secret_marker) as server:
+        profile = tmp_path / "profile.json"
+        profile.write_text(
+            json.dumps(
+                {
+                    "platform": "ctfd",
+                    "name": "artifact-local",
+                    "base_url": server.base_url,
+                    "auth": {"method": "manual"},
+                    "policy": {
+                        "allow_live_discovery": False,
+                        "allow_live_download": False,
+                        "allow_submission": True,
+                        "allow_instance_start": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        _run_json(["interactive", "init", "--contest-id", "demo", "--profile", str(profile), "--json"])
+        root = tmp_path / "contests" / "demo" / "operator"
+        (root / "board.json").write_text(
+            json.dumps(
+                {
+                    "contest_id": "demo",
+                    "challenges": [
+                        {
+                            "challenge_id": "rfc1149b",
+                            "name": "rfc1149b",
+                            "category": "rev",
+                            "status": "todo",
+                            "priority": 100,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        artifact = tmp_path / "rfc1149b.wasm"
+        artifact.write_bytes(b"\x00asm\x01\x02\x03")
+        expected_sha = "4fc449952b7b752dd0cdde23a6442e288b4e10a8d220df4fcbe3db4baa893a8e"
+
+        _run_json(
+            [
+                "interactive",
+                "submit-config",
+                "--contest-id",
+                "demo",
+                "--challenge-id",
+                "rfc1149b",
+                "--submit-type",
+                "artifact_upload",
+                "--endpoint",
+                f"{server.base_url}/submit",
+                "--status-url",
+                f"{server.base_url}/status/rfc1149b",
+                "--json",
+            ]
+        )
+        result, output = _run_json_with_output(
+            [
+                "interactive",
+                "upload-submit",
+                "--contest-id",
+                "demo",
+                "--challenge-id",
+                "rfc1149b",
+                "--artifact",
+                str(artifact),
+                "--confirm",
+                "--json",
+            ]
+        )
+
+        submissions = (root / "submissions.jsonl").read_text(encoding="utf-8")
+        events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+        summary = _run_json(["interactive", "metrics", "summary", "--contest-id", "demo", "--json"])
+        writeup = _run_json(
+            [
+                "interactive",
+                "writeup",
+                "--contest-id",
+                "demo",
+                "--challenge-id",
+                "rfc1149b",
+                "--category",
+                "rev",
+                "--json",
+            ]
+        )
+        snapshot_root = tmp_path / "public" / "demo"
+        snapshot = _run_json(
+            [
+                "interactive",
+                "metrics",
+                "publish-snapshot",
+                "--contest-id",
+                "demo",
+                "--output-root",
+                str(snapshot_root),
+                "--contest-ended",
+                "--json",
+            ]
+        )
+        combined_snapshot = "\n".join(path.read_text(encoding="utf-8") for path in snapshot_root.glob("*.public.*"))
+
+        assert result["status"] == "accepted"
+        assert result["record"]["artifact_sha256"] == expected_sha
+        assert result["record"]["artifact_size"] == 7
+        assert result["record"]["active_status"] == "active"
+        assert server.upload_count == 1
+        assert expected_sha in submissions
+        assert '"artifact_size": 7' in submissions
+        assert "artifact_submit_attempted" in events
+        assert "artifact_submit_accepted" in events
+        assert summary["artifact_submitted_count"] == 1
+        assert summary["artifact_accepted_count"] == 1
+        assert writeup["status"] == "ok"
+        assert snapshot["public_safe"] is True
+        assert expected_sha in combined_snapshot
+        assert raw_secret_marker not in output
+        assert raw_secret_marker not in submissions
+        assert raw_secret_marker not in events
+        assert raw_secret_marker not in combined_snapshot
 
 
 def test_writeup_refuses_unsolved_and_creates_ko_en_with_code_for_accepted(tmp_path: Path, monkeypatch):
@@ -281,6 +481,59 @@ class FakeSyncPlatform:
                 ]
             },
         )
+
+
+class ArtifactUploadServer:
+    def __init__(self, *, raw_secret_marker: str):
+        self.raw_secret_marker = raw_secret_marker
+        self.request_paths: list[str] = []
+        self.upload_count = 0
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _ArtifactUploadHandler)
+        self._httpd.owner = self
+        self._thread: threading.Thread | None = None
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._httpd.server_address[1]}"
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        if self._thread:
+            self._thread.join(timeout=2)
+        return False
+
+
+class _ArtifactUploadHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        owner: ArtifactUploadServer = self.server.owner
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length)
+        owner.request_paths.append(self.path)
+        owner.upload_count += 1
+        status = "accepted" if b"\x00asm" in body else "rejected"
+        self._send_json({"status": status, "active": status == "accepted", "token": owner.raw_secret_marker})
+
+    def do_GET(self):
+        owner: ArtifactUploadServer = self.server.owner
+        owner.request_paths.append(self.path)
+        self._send_json({"status": "active", "active": True, "cookie": owner.raw_secret_marker})
+
+    def log_message(self, format, *args):
+        return
+
+    def _send_json(self, payload: dict):
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def _seed_board(tmp_path: Path, monkeypatch, profile: Path | None = None) -> None:

@@ -86,8 +86,34 @@ Submit:
 
 ```bash
 ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
 ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
 ```
+
+Artifact upload workflow:
+
+```bash
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id rfc1149b --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --status-url https://example.invalid/status/rfc1149b --json
+ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id rfc1149b --artifact ./solution.wasm --confirm --json
+```
+
+`submit-config` stores challenge submit metadata in local operator state and mirrors it into `board.json` when the challenge is present. The artifact schema is:
+
+```json
+{
+  "challenge_id": "rfc1149b",
+  "submit_type": "artifact_upload",
+  "endpoint": "https://example.invalid/submit",
+  "method": "multipart",
+  "field_name": "file",
+  "auth_source": "profile",
+  "status_check": "optional"
+}
+```
+
+`upload-submit` computes artifact SHA-256 and size before any network action. It blocks without uploading when submit metadata and `--endpoint` are both missing, when the endpoint is not an HTTP/HTTPS URL, when credentials or secret-bearing query parameters are embedded in the URL, when the endpoint origin differs from the profile `base_url`, or when profile policy does not allow submission. A local terminal may show the artifact path and output for verification, but auth headers, cookies, tokens, browser storage, private keys, and raw response bodies are not printed.
+
+Accepted upload records are appended to `submissions.jsonl` with artifact SHA-256, size, submit timestamp, response status, and active status. Only accepted/active artifact uploads update `solved.jsonl`, which is the writeup gate. Rejected or blocked uploads get metrics and local records but do not enable ko/en writeup generation.
 
 Stalled and external solves:
 
@@ -122,9 +148,11 @@ The operator directory contains:
 
 - `BOARD.md`: human-readable board.
 - `board.json`: machine-readable challenge state.
+- `operator.json`: local profile/writeup settings and optional challenge submit metadata.
 - `solved.jsonl`: accepted local solve records with hash-only flag data.
 - `external_solved.txt`: challenge IDs solved outside this local machine.
 - `stalled.jsonl`: compact stalled handoffs.
+- `submissions.jsonl`: flag hashes or artifact SHA-256/size/status records, with no raw auth material.
 - `claims/`: same-machine claim lock files.
 - `memos/`: per-challenge memo files.
 
@@ -205,7 +233,7 @@ metrics/summary.json
 metrics/regression_report.md
 ```
 
-The claim, release, stalled, external-solved, submit, writeup, and cleanup
+The claim, release, stalled, external-solved, submit, artifact upload, writeup, and cleanup
 commands record events where practical. Manual observations can be appended:
 
 ```bash
@@ -220,8 +248,9 @@ ctfctl interactive metrics compare-public --before old-summary.public.json --aft
 ```
 
 The summary includes event counts, session count, claimed/solved/stalled/submit
-counts, accepted/writeup/cleanup counts, observed token totals when present, and
-average time to solve when claim and solve timestamps are available.
+counts, artifact submitted/accepted/rejected/blocked counts,
+accepted/writeup/cleanup counts, observed token totals when present, and average
+time to solve when claim and solve timestamps are available.
 
 Local raw metrics are private. GitHub-managed metrics must be generated through
 public-safe snapshots only. `publish-snapshot` creates
@@ -229,19 +258,20 @@ public-safe snapshots only. `publish-snapshot` creates
 `approaches.public.md`, and `regression.public.md` under
 `metrics/contests/<contest-id>` by default. These files may include challenge
 names, categories, elapsed times, high-level approach labels, stalled blockers,
-counts, and observed token totals, but must not include raw flags, cookies,
-sessions, browser storage, private keys, auth material, exploit bodies, or full
-writeup bodies.
+counts, observed token totals, and artifact upload SHA-256/size/status, but must
+not include raw flags, cookies, sessions, browser storage, private keys, auth
+material, artifact contents, local artifact paths, upload endpoints, raw
+responses, exploit bodies, or full writeup bodies.
 
 During an active contest, do not upload contest writeups, flags, exploits, or
 private artifacts. Public snapshot export is blocked unless the contest is ended
 with `--contest-ended` or the operator explicitly provides both
 `--allow-active-contest` and `--confirm-public-safe`. Unsolved challenges get
 stalled metrics with memo/attempts/next_steps, not writeups. After an accepted
-solve, use submit -> writeup ko/en -> cleanup -> metrics update -> next
-challenge. After a stall, use memo/attempts/next_steps -> metrics update -> next
-challenge. At contest end, use publish-snapshot -> dashboard -> optional git
-commit.
+solve, use submit or accepted/active upload-submit -> writeup ko/en -> cleanup
+-> metrics update -> next challenge. After a stall, use
+memo/attempts/next_steps -> metrics update -> next challenge. At contest end,
+use publish-snapshot -> dashboard -> optional git commit.
 
 ## Pre-Release Check
 

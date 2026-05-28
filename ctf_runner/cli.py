@@ -75,6 +75,7 @@ from .interactive import (
     metrics_summary as interactive_metrics_summary,
     release_claim as interactive_release_claim,
     solver_prompt as interactive_solver_prompt,
+    submit_config as interactive_submit_config,
     submit_flag_file as interactive_submit_flag_file,
     sync_operator as interactive_sync_operator,
     upload_submit as interactive_upload_submit,
@@ -374,9 +375,26 @@ def _cmd_interactive_upload_submit(args: argparse.Namespace) -> int:
         challenge_id=args.challenge_id,
         artifact=args.artifact,
         confirm=args.confirm,
+        endpoint=args.endpoint,
+        field_name=args.field_name,
+        method=args.method,
+        status_url=args.status_url,
     )
     _print_json(data)
-    return 0
+    return 0 if data.get("status") not in {"blocked", "rejected"} else 1
+
+
+def _cmd_interactive_submit_config(args: argparse.Namespace) -> int:
+    data = interactive_submit_config(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        submit_type=args.submit_type,
+        endpoint=args.endpoint,
+        field_name=args.field_name,
+        status_url=args.status_url,
+    )
+    _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
 
 
 def _cmd_interactive_writeup(args: argparse.Namespace) -> int:
@@ -2098,8 +2116,21 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_upload_submit.add_argument("--challenge-id", required=True)
     interactive_upload_submit.add_argument("--artifact", required=True)
     interactive_upload_submit.add_argument("--confirm", action="store_true")
+    interactive_upload_submit.add_argument("--endpoint")
+    interactive_upload_submit.add_argument("--field-name")
+    interactive_upload_submit.add_argument("--method")
+    interactive_upload_submit.add_argument("--status-url")
     interactive_upload_submit.add_argument("--json", action="store_true")
     interactive_upload_submit.set_defaults(func=_cmd_interactive_upload_submit)
+    interactive_submit_config = interactive_sub.add_parser("submit-config")
+    interactive_submit_config.add_argument("--contest-id", required=True)
+    interactive_submit_config.add_argument("--challenge-id", required=True)
+    interactive_submit_config.add_argument("--submit-type", choices=["flag", "artifact_upload", "manual"], required=True)
+    interactive_submit_config.add_argument("--endpoint")
+    interactive_submit_config.add_argument("--field-name")
+    interactive_submit_config.add_argument("--status-url")
+    interactive_submit_config.add_argument("--json", action="store_true")
+    interactive_submit_config.set_defaults(func=_cmd_interactive_submit_config)
     interactive_writeup = interactive_sub.add_parser("writeup")
     interactive_writeup.add_argument("--contest-id", required=True)
     interactive_writeup.add_argument("--challenge-id", required=True)

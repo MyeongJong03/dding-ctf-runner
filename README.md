@@ -75,6 +75,7 @@ Each Codex terminal should keep going until the contest ends, the operator stops
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind memory --append "short fact" --json
 ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
 ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
 ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
 ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
@@ -90,6 +91,15 @@ Writeups are accepted-only. Accepted challenges produce both Korean and English 
 ```
 
 If solver or exploit code exists, include the complete code in fenced markdown blocks. Unsolved challenges do not get writeups; leave compact `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records instead.
+
+For wasm/file/artifact-submit challenges, save official endpoint metadata before uploading:
+
+```bash
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id rfc1149b --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
+ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id rfc1149b --artifact ./solution.wasm --confirm --json
+```
+
+`upload-submit` blocks instead of uploading when no configured or CLI endpoint exists, when the endpoint is not on the profile `base_url` origin, or when profile policy does not allow submission. It records artifact SHA-256, size, submit timestamp, response status, and active status locally in `submissions.jsonl`; raw auth material and raw response bodies are not stored or printed.
 
 ## Runtime State
 
@@ -112,6 +122,7 @@ GitHub-managed metrics must be public-safe snapshots only:
 
 - Do not upload contest flags, writeups, exploit bodies, auth material, or private artifacts during an active contest.
 - Unsolved challenges get stalled metrics with high-level blockers and next steps, not writeups.
+- Artifact upload public snapshots may include artifact SHA-256, size, and status only; they must not include auth, paths, raw responses, or private artifact contents.
 - After an accepted solve, run submit -> ko/en writeup -> cleanup -> metrics update -> next challenge.
 - After a stall, record memo/attempts/next_steps -> metrics update -> next challenge.
 - At contest end, run `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended`, then `ctfctl interactive metrics dashboard`, then optionally commit the generated public-safe files.

@@ -17,6 +17,7 @@ Primary risks:
 - Accidental live submit after a solve candidate appears in competition mode.
 - Accidental browser auth capture during setup.
 - Duplicate or low-confidence submissions consuming limited attempts.
+- Artifact upload challenges sending generated files to an unofficial endpoint or leaking uploaded artifacts, local paths, raw responses, or auth headers into public snapshots.
 - Concurrent workers racing into duplicate claims or duplicate submits.
 - Interactive same-machine Codex sessions duplicating claims unintentionally.
 - Background worker processes running after the operator believes a contest is paused.
@@ -55,12 +56,17 @@ Controls:
 - Interactive `init` creates the operator directory when it is missing.
 - Interactive board state lives under `~/CTF/contests/<contest>/operator/`, outside this repo.
 - Operator files may contain `BOARD.md`, `board.json`, `solved.jsonl`, `external_solved.txt`, `stalled.jsonl`, `claims/`, `memos/`, and `metrics/`, but must not contain raw cookies, tokens, auth headers, browser storage, passwords, private keys, or shell history.
+- Artifact submit metadata is local operator state. `ctfctl interactive submit-config` records submit type, endpoint, method, field name, auth source, and optional status URL without reading auth material.
+- `ctfctl interactive upload-submit` computes artifact SHA-256 and size before upload, blocks when no endpoint/config exists, and allows live upload only to HTTP/HTTPS endpoints on the configured profile `base_url` origin with submission policy enabled.
+- Artifact upload records store artifact SHA-256, size, submit timestamp, response status, and active status. They do not store auth headers, cookies, browser storage, private keys, raw response bodies, or artifact contents.
+- Accepted/active artifact uploads may update `solved.jsonl`; blocked, rejected, planned, or inactive uploads do not enable writeup generation.
 - Same-machine interactive claims use local claim locks by default. `--allow-duplicate` is explicit and should be used only for intentional local duplicate solving. Cross-machine duplicate claims are out of scope and must be handled manually if the team cares.
 - Interactive self memos are limited to sanitized `memory`, `evidence`, `attempts`, `next_steps`, and `operator_notes`.
 - Stalled interactive challenges keep compact local handoffs only. They do not get writeups.
 - Interactive writeups are accepted-only and must be generated as Korean and English files named `[category]ChallengeNameWriteup.ko.md` and `[category]ChallengeNameWriteup.en.md`.
 - Solver or exploit code should be included completely in accepted writeups. Writeups are local-only during the contest and must not be published or uploaded externally until reviewed after the event.
 - Interactive metrics are local-only under `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`.
+- Public-safe metric snapshots may include artifact SHA-256, size, response status, and active status only. They must not include upload endpoints, local artifact paths, raw responses, auth material, or artifact contents.
 - Background worker/supervisor/start-workers flows are legacy/advanced and should not be the normal live operation path.
 - Platform actions require `ctfctl` gates, `--live`, and `--confirm` where needed.
 - `ctfctl --mode setup|rehearsal|competition` separates setup, read-only rehearsal, and live competition execution. Setup blocks real challenge solve, live submit, instance start, browser login automation, and public tunnel exposure. Rehearsal permits real read-only ingest but blocks live submit and blocks real solve unless `--allow-real-solve-dry-run` is present. Competition requires `--confirm-competition`, an armed contest, and policy gates.

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .auth import load_auth_secret, load_config_metadata
 from .fake_ctfd import FakeCTFdServer, default_correct_flag, platform_config
 from .ingest import ingest_challenge, ingest_text_challenge
 from .paths import get_paths
@@ -388,23 +393,239 @@ def submit_flag_file(contest_id: str, *, challenge_id: str, flag_file: str | Pat
     }
 
 
-def upload_submit(contest_id: str, *, challenge_id: str, artifact: str | Path, confirm: bool) -> dict[str, Any]:
-    path = Path(artifact).expanduser()
-    digest = _sha256_file(path) if path.exists() else ""
-    payload = {
-        "status": "blocked",
-        "reason": "official_upload_endpoint_metadata_missing",
+def submit_config(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    submit_type: str,
+    endpoint: str | None = None,
+    field_name: str | None = None,
+    status_url: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    normalized_type = str(submit_type or "").strip()
+    if normalized_type not in {"flag", "artifact_upload", "manual"}:
+        return {"status": "blocked", "reason": "unsupported_submit_type", "contest_id": contest_id, "challenge_id": challenge_id}
+    metadata = _normalize_submit_metadata(
+        {
+            "challenge_id": str(item.get("challenge_id") or challenge_id),
+            "submit_type": normalized_type,
+            "endpoint": endpoint,
+            "method": "multipart" if normalized_type == "artifact_upload" else None,
+            "field_name": field_name or ("file" if normalized_type == "artifact_upload" else None),
+            "auth_source": "profile",
+            "status_url": status_url,
+            "status_check": "optional" if status_url or normalized_type == "artifact_upload" else None,
+        }
+    )
+    syntax = _validate_submit_metadata_urls(metadata)
+    if not syntax["allowed"]:
+        return {
+            "status": "blocked",
+            "reason": syntax["reason"],
+            "contest_id": contest_id,
+            "challenge_id": str(item.get("challenge_id") or challenge_id),
+            "metadata": _redact_object(metadata),
+        }
+    _save_challenge_submit_metadata(root, board, str(item.get("challenge_id") or challenge_id), metadata)
+    return {
+        "status": "ok",
         "contest_id": contest_id,
-        "challenge_id": challenge_id,
-        "artifact": {
-            "path": _display(path),
-            "exists": path.exists(),
-            "size": path.stat().st_size if path.exists() else 0,
-            "sha256": digest,
-        },
-        "confirm": bool(confirm),
+        "challenge_id": str(item.get("challenge_id") or challenge_id),
+        "metadata": _redact_object(metadata),
+        "warnings": syntax.get("warnings", []),
+        "operator_config": _display(root / "operator.json"),
+        "board_path": _display(root / "board.json"),
     }
-    return payload
+
+
+def upload_submit(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    artifact: str | Path,
+    confirm: bool,
+    endpoint: str | None = None,
+    field_name: str | None = None,
+    method: str | None = None,
+    status_url: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    path = Path(artifact).expanduser()
+    artifact_info = _artifact_info(path)
+    stored_metadata = _challenge_submit_metadata(root, board, str(item.get("challenge_id") or challenge_id))
+    effective_metadata = _normalize_submit_metadata(
+        {
+            **stored_metadata,
+            "challenge_id": str(item.get("challenge_id") or challenge_id),
+            "submit_type": stored_metadata.get("submit_type") or ("artifact_upload" if endpoint else None),
+            "endpoint": endpoint or stored_metadata.get("endpoint"),
+            "method": method or stored_metadata.get("method") or "multipart",
+            "field_name": field_name or stored_metadata.get("field_name") or "file",
+            "auth_source": stored_metadata.get("auth_source") or "profile",
+            "status_url": status_url or stored_metadata.get("status_url"),
+            "status_check": stored_metadata.get("status_check") or "optional",
+        }
+    )
+    challenge_key = str(effective_metadata.get("challenge_id") or challenge_id)
+    base_record = {
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "submit_type": "artifact_upload",
+        "artifact_path": artifact_info["path"],
+        "artifact_exists": artifact_info["exists"],
+        "artifact_size": artifact_info["size"],
+        "artifact_sha256": artifact_info["sha256"],
+        "method": str(effective_metadata.get("method") or "multipart"),
+        "field_name": str(effective_metadata.get("field_name") or "file"),
+        "endpoint": str(effective_metadata.get("endpoint") or ""),
+        "status_url": str(effective_metadata.get("status_url") or ""),
+        "auth_source": str(effective_metadata.get("auth_source") or "profile"),
+        "timestamp": utc_now(),
+    }
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="artifact_submit_planned",
+        challenge_id=challenge_key,
+        data=_artifact_metric_data({**base_record, "status": "planned"}),
+    )
+
+    def finish(status: str, reason: str = "", **extra: Any) -> dict[str, Any]:
+        timestamp = str(base_record["timestamp"])
+        record = {
+            **base_record,
+            **extra,
+            "status": status,
+            "reason": reason,
+            "submitted_at": timestamp,
+            "active_status": str(extra.get("active_status") or ("active" if status == "accepted" else "unknown")),
+        }
+        _append_jsonl(root / "submissions.jsonl", record)
+        terminal_event = _artifact_terminal_event(status)
+        if terminal_event:
+            _record_metrics_event(
+                root,
+                contest_id=contest_id,
+                event=terminal_event,
+                challenge_id=challenge_key,
+                data=_artifact_metric_data(record),
+            )
+        if status == "accepted" and record.get("active_status") == "active":
+            solved = {
+                "contest_id": contest_id,
+                "challenge_id": challenge_key,
+                "name": item.get("name"),
+                "category": item.get("category"),
+                "status": "accepted",
+                "submit_type": "artifact_upload",
+                "artifact_sha256": record.get("artifact_sha256"),
+                "artifact_size": record.get("artifact_size"),
+                "active_status": record.get("active_status"),
+                "timestamp": timestamp,
+            }
+            _append_jsonl(root / "solved.jsonl", solved)
+            if isinstance(item, dict):
+                item["status"] = "solved"
+                item["solved_at"] = timestamp
+                item["artifact_sha256"] = record.get("artifact_sha256")
+            _release_locks(root, agent=None, challenge=challenge_key)
+            _write_board(root, board)
+            _write_board_md(root, board)
+        return {
+            "status": status,
+            "reason": reason,
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "artifact": artifact_info,
+            "metadata": _redact_object(effective_metadata),
+            "record": _redact_object(record),
+        }
+
+    if not stored_metadata.get("submit_type") and not endpoint:
+        return finish("blocked", "official_upload_endpoint_metadata_missing")
+    if str(effective_metadata.get("submit_type") or "") != "artifact_upload":
+        return finish("blocked", "submit_type_not_artifact_upload")
+    if not artifact_info["exists"]:
+        return finish("blocked", "artifact_missing")
+    if str(effective_metadata.get("method") or "").strip().lower() != "multipart":
+        return finish("blocked", "unsupported_upload_method")
+    if not effective_metadata.get("endpoint"):
+        return finish("blocked", "official_upload_endpoint_metadata_missing")
+
+    endpoint_check = _validate_official_upload_endpoint(root, str(effective_metadata["endpoint"]), label="endpoint")
+    if not endpoint_check["allowed"]:
+        return finish("blocked", endpoint_check["reason"], validation=endpoint_check)
+    if effective_metadata.get("status_url"):
+        status_check_url = _validate_official_upload_endpoint(root, str(effective_metadata["status_url"]), label="status_url")
+        if not status_check_url["allowed"]:
+            return finish("blocked", status_check_url["reason"], validation=status_check_url)
+
+    if not confirm:
+        return finish("planned", "confirm_required")
+
+    if endpoint or status_url or field_name or method:
+        _save_challenge_submit_metadata(root, board, challenge_key, effective_metadata)
+
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="artifact_submit_attempted",
+        challenge_id=challenge_key,
+        data=_artifact_metric_data({**base_record, "status": "attempted"}),
+    )
+    try:
+        headers = _upload_auth_headers(root, str(effective_metadata["endpoint"]))
+        upload_result = _multipart_upload(
+            str(effective_metadata["endpoint"]),
+            artifact_path=path,
+            field_name=str(effective_metadata.get("field_name") or "file"),
+            headers=headers,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        return finish("blocked", "auth_or_config_missing", response_status="blocked", response_summary=redact_text(str(exc))[:500])
+    except urllib.error.HTTPError as exc:
+        upload_result = _upload_http_error(exc)
+    except urllib.error.URLError as exc:
+        return finish("rejected", "network_error", response_status="network_error", response_summary=redact_text(str(getattr(exc, "reason", exc)))[:500])
+
+    final = dict(upload_result)
+    if effective_metadata.get("status_url"):
+        try:
+            status_headers = _upload_auth_headers(root, str(effective_metadata["status_url"]))
+            status_result = _status_check(str(effective_metadata["status_url"]), headers=status_headers)
+            final["status_check"] = status_result
+            final = _merge_upload_status(upload_result, status_result)
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            final["status_check"] = {"response_status": "blocked", "response_summary": redact_text(str(exc))[:500]}
+        except urllib.error.HTTPError as exc:
+            final["status_check"] = _upload_http_error(exc)
+            final = _merge_upload_status(upload_result, final["status_check"])
+        except urllib.error.URLError as exc:
+            final["status_check"] = {"response_status": "network_error", "response_summary": redact_text(str(getattr(exc, "reason", exc)))[:500]}
+
+    response_status = str(final.get("response_status") or "unknown")
+    active_status = str(final.get("active_status") or ("active" if response_status == "accepted" else "unknown"))
+    if response_status == "accepted" and active_status == "active":
+        final_status = "accepted"
+        reason = "accepted"
+    elif response_status in {"auth_required", "blocked"}:
+        final_status = "blocked"
+        reason = response_status
+    elif response_status == "rate_limited":
+        final_status = "rejected"
+        reason = "rate_limited"
+    else:
+        final_status = "rejected"
+        reason = response_status if response_status != "unknown" else "unexpected_response"
+    final["active_status"] = active_status
+    return finish(final_status, reason, **final)
 
 
 def writeup_challenge(
@@ -501,6 +722,10 @@ def metrics_compare(before: str | Path, after: str | Path) -> dict[str, Any]:
         "stalled_count",
         "submitted_count",
         "accepted_count",
+        "artifact_submitted_count",
+        "artifact_accepted_count",
+        "artifact_rejected_count",
+        "artifact_blocked_count",
         "writeup_ko_count",
         "writeup_en_count",
         "cleanup_count",
@@ -548,6 +773,7 @@ def metrics_publish_snapshot(
     contest_events = [row for row in events if row.get("contest_id") == contest_id]
     challenge_index = _public_challenge_index(board, contest_events, root)
     attempts_total = _attempts_total(contest_events)
+    artifact_submissions = _public_artifact_submissions(root, contest_id)
 
     summary_public = {
         **summary,
@@ -558,6 +784,8 @@ def metrics_publish_snapshot(
         "snapshot_generated_at": utc_now(),
         "challenge_count": len(challenge_index),
         "attempts_total": attempts_total,
+        "artifact_submissions": artifact_submissions,
+        "artifact_submission_count": len(artifact_submissions),
     }
 
     out_root = Path(output_root).expanduser() if output_root else get_paths().repo / "metrics" / "contests" / _safe_slug(contest_id)
@@ -659,6 +887,8 @@ def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None =
             "metrics_dashboard": True,
             "metrics_baseline": True,
             "metrics_compare_public": True,
+            "submit_config": True,
+            "upload_submit": True,
         },
         "prompt_policy_summary": {
             "local_raw_flag_output_allowed": True,
@@ -678,6 +908,10 @@ def metrics_compare_public(before: str | Path, after: str | Path) -> dict[str, A
         "solved_count",
         "stalled_count",
         "accepted_count",
+        "artifact_submitted_count",
+        "artifact_accepted_count",
+        "artifact_rejected_count",
+        "artifact_blocked_count",
         "writeup_ko_count",
         "writeup_en_count",
         "cleanup_count",
@@ -805,6 +1039,10 @@ def metrics_report(contest_id: str, *, output: str | Path | None = None) -> dict
         f"- stalled_count: {summary['stalled_count']}",
         f"- submitted_count: {summary['submitted_count']}",
         f"- accepted_count: {summary['accepted_count']}",
+        f"- artifact_submitted_count: {summary.get('artifact_submitted_count', 0)}",
+        f"- artifact_accepted_count: {summary.get('artifact_accepted_count', 0)}",
+        f"- artifact_rejected_count: {summary.get('artifact_rejected_count', 0)}",
+        f"- artifact_blocked_count: {summary.get('artifact_blocked_count', 0)}",
         f"- writeup_ko_count: {summary['writeup_ko_count']}",
         f"- writeup_en_count: {summary['writeup_en_count']}",
         f"- cleanup_count: {summary['cleanup_count']}",
@@ -853,6 +1091,7 @@ Coordination:
 
 Submission and writeups:
 - Submit only high-confidence candidates through ctfctl interactive submit with --confirm and a flag file.
+- For wasm/file artifact challenges, first save official metadata with ctfctl interactive submit-config, then use ctfctl interactive upload-submit --artifact <path> --confirm.
 - If accepted, write Korean and English writeups with ctfctl interactive writeup --languages ko,en --include-code.
 - Writeups are local-only during the contest and accepted-only. Never write a challenge writeup for unsolved/stalled work.
 - If solver/exploit code exists, include the complete code in the writeup.
@@ -968,6 +1207,324 @@ def _operator_config(root: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _challenge_submit_metadata(root: Path, board: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
+    board_metadata: dict[str, Any] = {}
+    item = _find_challenge(board, challenge_id)
+    if isinstance(item, Mapping):
+        raw = item.get("submit_metadata") or item.get("submit")
+        if isinstance(raw, Mapping):
+            board_metadata.update(dict(raw))
+    top_level = board.get("submit_metadata") if isinstance(board.get("submit_metadata"), Mapping) else {}
+    if isinstance(top_level, Mapping) and isinstance(top_level.get(challenge_id), Mapping):
+        board_metadata.update(dict(top_level[challenge_id]))
+    config = _operator_config(root)
+    configured = config.get("challenge_submit_metadata") if isinstance(config.get("challenge_submit_metadata"), Mapping) else {}
+    operator_metadata = dict(configured.get(challenge_id) or {}) if isinstance(configured.get(challenge_id), Mapping) else {}
+    return _normalize_submit_metadata({**board_metadata, **operator_metadata})
+
+
+def _save_challenge_submit_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
+    normalized = _normalize_submit_metadata({**dict(metadata), "challenge_id": challenge_id})
+    config_path = root / "operator.json"
+    config = _operator_config(root)
+    configured = dict(config.get("challenge_submit_metadata") or {}) if isinstance(config.get("challenge_submit_metadata"), Mapping) else {}
+    configured[challenge_id] = normalized
+    config["challenge_submit_metadata"] = configured
+    config["updated_at"] = utc_now()
+    _write_json(config_path, config)
+
+    board_submit = dict(board.get("submit_metadata") or {}) if isinstance(board.get("submit_metadata"), Mapping) else {}
+    board_submit[challenge_id] = normalized
+    board["submit_metadata"] = board_submit
+    item = _find_challenge(board, challenge_id)
+    if isinstance(item, dict):
+        item["submit_metadata"] = normalized
+    board["updated_at"] = utc_now()
+    _write_board(root, board)
+    _write_board_md(root, board)
+
+
+def _normalize_submit_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key in ("challenge_id", "submit_type", "endpoint", "method", "field_name", "auth_source", "status_url", "status_check"):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        result[key] = text
+    if result.get("submit_type") == "artifact_upload":
+        result.setdefault("method", "multipart")
+        result.setdefault("field_name", "file")
+        result.setdefault("auth_source", "profile")
+        result.setdefault("status_check", "optional")
+    if "method" in result:
+        result["method"] = str(result["method"]).strip().lower()
+    return result
+
+
+def _validate_submit_metadata_urls(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    warnings: list[str] = []
+    field_name = str(metadata.get("field_name") or "")
+    if field_name and not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", field_name):
+        return {"allowed": False, "reason": "upload_field_name_invalid", "warnings": warnings}
+    for key in ("endpoint", "status_url"):
+        value = str(metadata.get(key) or "").strip()
+        if not value:
+            continue
+        check = _validate_endpoint_url_syntax(value, label=key)
+        if not check["allowed"]:
+            return check
+    return {"allowed": True, "reason": "", "warnings": warnings}
+
+
+def _artifact_info(path: Path) -> dict[str, Any]:
+    exists = path.exists() and path.is_file()
+    return {
+        "path": _display(path),
+        "exists": exists,
+        "size": path.stat().st_size if exists else 0,
+        "sha256": _sha256_file(path) if exists else "",
+    }
+
+
+def _validate_official_upload_endpoint(root: Path, url: str, *, label: str) -> dict[str, Any]:
+    syntax = _validate_endpoint_url_syntax(url, label=label)
+    if not syntax["allowed"]:
+        return syntax
+    config = _operator_config(root)
+    profile_path = str(config.get("profile_path") or "").strip()
+    if not profile_path or profile_path == "TODO":
+        return {"allowed": False, "reason": "profile_missing_for_endpoint_validation", "label": label}
+    loaded = load_config_metadata(Path(profile_path).expanduser())
+    if not loaded.get("exists"):
+        return {"allowed": False, "reason": "profile_missing_for_endpoint_validation", "label": label}
+    data = dict(loaded.get("data") or {})
+    if not bool((data.get("policy") if isinstance(data.get("policy"), Mapping) else {}).get("allow_submission")):
+        return {"allowed": False, "reason": "artifact_upload_not_allowed_by_profile_policy", "label": label}
+    base_url = str(data.get("base_url") or data.get("url") or "").strip()
+    if not base_url:
+        return {"allowed": False, "reason": "profile_base_url_missing_for_endpoint_validation", "label": label}
+    base_check = _validate_endpoint_url_syntax(base_url, label="profile_base_url")
+    if not base_check["allowed"]:
+        return {"allowed": False, "reason": "profile_base_url_invalid_for_endpoint_validation", "label": label}
+    if not _same_url_origin(url, base_url):
+        return {"allowed": False, "reason": f"{label}_not_official_profile_origin", "label": label, "profile_origin": _url_origin(base_url)}
+    return {"allowed": True, "reason": "", "label": label, "profile_origin": _url_origin(base_url)}
+
+
+def _validate_endpoint_url_syntax(url: str, *, label: str) -> dict[str, Any]:
+    try:
+        parsed = urllib.parse.urlsplit(str(url).strip())
+    except ValueError:
+        return {"allowed": False, "reason": f"{label}_invalid_url", "label": label}
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {"allowed": False, "reason": f"{label}_requires_http_url", "label": label}
+    if parsed.username or parsed.password:
+        return {"allowed": False, "reason": f"{label}_must_not_embed_auth_material", "label": label}
+    query_keys = {key.lower() for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+    if any(any(marker in key for marker in ("token", "secret", "cookie", "session", "auth", "password", "key")) for key in query_keys):
+        return {"allowed": False, "reason": f"{label}_must_not_embed_auth_material", "label": label}
+    if parsed.fragment:
+        return {"allowed": False, "reason": f"{label}_must_not_use_fragment", "label": label}
+    return {"allowed": True, "reason": "", "label": label}
+
+
+def _same_url_origin(left: str, right: str) -> bool:
+    return _url_origin(left) == _url_origin(right)
+
+
+def _url_origin(value: str) -> str:
+    parsed = urllib.parse.urlsplit(str(value).strip())
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80 if parsed.scheme == "http" else None
+    return f"{parsed.scheme}://{host}:{port}" if port else f"{parsed.scheme}://{host}"
+
+
+def _upload_auth_headers(root: Path, endpoint: str) -> dict[str, str]:
+    config = _operator_config(root)
+    profile_path = str(config.get("profile_path") or "").strip()
+    if not profile_path or profile_path == "TODO":
+        raise FileNotFoundError("profile missing")
+    loaded = load_config_metadata(Path(profile_path).expanduser())
+    if not loaded.get("exists"):
+        raise FileNotFoundError("profile missing")
+    data = dict(loaded.get("data") or {})
+    secret = load_auth_secret(data, live=True)
+    headers = {"Accept": "application/json"}
+    headers.update(secret.build_headers(base_url=endpoint))
+    return headers
+
+
+def _multipart_upload(endpoint: str, *, artifact_path: Path, field_name: str, headers: Mapping[str, str]) -> dict[str, Any]:
+    boundary = f"dding-{hashlib.sha256((artifact_path.name + utc_now()).encode('utf-8')).hexdigest()[:32]}"
+    filename = _safe_upload_filename(artifact_path.name)
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    file_bytes = artifact_path.read_bytes()
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                f'Content-Disposition: form-data; name="{_multipart_quote(field_name)}"; '
+                f'filename="{_multipart_quote(filename)}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii"),
+            file_bytes,
+            f"\r\n--{boundary}--\r\n".encode("ascii"),
+        ]
+    )
+    request_headers = dict(headers)
+    request_headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+    request_headers["Content-Length"] = str(len(body))
+    request = urllib.request.Request(endpoint, data=body, headers=request_headers, method="POST")
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - endpoint is official-profile validated.
+        raw_body = response.read(512 * 1024)
+        status_code = int(getattr(response, "status", 0) or getattr(response, "code", 0) or 200)
+    return _classify_upload_response(status_code, raw_body)
+
+
+def _status_check(status_url: str, *, headers: Mapping[str, str]) -> dict[str, Any]:
+    request = urllib.request.Request(status_url, headers=dict(headers), method="GET")
+    with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310 - endpoint is official-profile validated.
+        raw_body = response.read(512 * 1024)
+        status_code = int(getattr(response, "status", 0) or getattr(response, "code", 0) or 200)
+    return _classify_upload_response(status_code, raw_body)
+
+
+def _upload_http_error(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    try:
+        raw_body = exc.read(512 * 1024)
+    except Exception:
+        raw_body = b""
+    return _classify_upload_response(int(exc.code), raw_body)
+
+
+def _classify_upload_response(status_code: int, raw_body: bytes) -> dict[str, Any]:
+    text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
+    payload: Any
+    try:
+        payload = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        payload = {"message": text}
+    combined = _response_text(payload).lower()
+    active = _response_active(payload)
+    if status_code in {401, 403}:
+        response_status = "auth_required"
+    elif status_code == 429 or "rate limit" in combined or "too many" in combined:
+        response_status = "rate_limited"
+    elif status_code >= 400:
+        response_status = "rejected"
+    elif active is False or any(token in combined for token in ("incorrect", "wrong", "rejected", "failed", "inactive", "invalid")):
+        response_status = "rejected"
+    elif active is True or any(token in combined for token in ("accepted", "correct", "success", "active", "solved")):
+        response_status = "accepted"
+    else:
+        response_status = "unknown"
+    active_status = "active" if response_status == "accepted" or active is True else "inactive" if active is False else "unknown"
+    return {
+        "http_status": status_code,
+        "response_status": response_status,
+        "active_status": active_status,
+        "response_summary": _response_summary(status_code, payload),
+    }
+
+
+def _merge_upload_status(upload: Mapping[str, Any], status_check: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(upload)
+    merged["status_check"] = dict(status_check)
+    status_response = str(status_check.get("response_status") or "")
+    status_active = str(status_check.get("active_status") or "")
+    if status_response == "accepted" or status_active == "active":
+        merged["response_status"] = "accepted"
+        merged["active_status"] = "active"
+    elif status_active == "inactive" or status_response in {"rejected", "auth_required", "rate_limited"}:
+        merged["response_status"] = status_response or "rejected"
+        merged["active_status"] = status_active or "inactive"
+    return merged
+
+
+def _response_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        parts: list[str] = []
+        for key in ("status", "result", "state", "message", "detail", "error"):
+            item = value.get(key)
+            if item is not None:
+                parts.append(str(item))
+        for key in ("data", "response"):
+            item = value.get(key)
+            if isinstance(item, Mapping):
+                parts.append(_response_text(item))
+        return " ".join(parts)
+    if isinstance(value, list):
+        return " ".join(_response_text(item) for item in value[:5])
+    return str(value or "")
+
+
+def _response_active(value: Any) -> bool | None:
+    if isinstance(value, Mapping):
+        for key in ("active", "is_active", "accepted", "ok", "success", "solved"):
+            item = value.get(key)
+            if isinstance(item, bool):
+                return item
+        for key in ("data", "response"):
+            item = value.get(key)
+            nested = _response_active(item)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _response_summary(status_code: int, payload: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {"http_status": status_code}
+    if isinstance(payload, Mapping):
+        source = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+        for key in ("status", "result", "state", "message", "detail", "error"):
+            if key in source:
+                summary[key] = redact_text(str(source.get(key) or ""))[:500]
+        active = _response_active(payload)
+        if active is not None:
+            summary["active"] = active
+    elif payload:
+        summary["message"] = redact_text(str(payload))[:500]
+    return summary
+
+
+def _artifact_terminal_event(status: str) -> str:
+    if status == "accepted":
+        return "artifact_submit_accepted"
+    if status == "blocked":
+        return "artifact_submit_blocked"
+    if status == "rejected":
+        return "artifact_submit_rejected"
+    return ""
+
+
+def _artifact_metric_data(record: Mapping[str, Any]) -> dict[str, Any]:
+    data = {
+        "status": record.get("status"),
+        "reason": record.get("reason"),
+        "artifact_sha256": record.get("artifact_sha256"),
+        "artifact_size": record.get("artifact_size"),
+        "response_status": record.get("response_status"),
+        "http_status": record.get("http_status"),
+        "active_status": record.get("active_status"),
+        "submitted_at": record.get("submitted_at") or record.get("timestamp"),
+    }
+    return {key: value for key, value in data.items() if value not in (None, "")}
+
+
+def _safe_upload_filename(value: str) -> str:
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(value or "artifact.bin").name).strip("._")
+    return filename[:160] or "artifact.bin"
+
+
+def _multipart_quote(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _canonicalize_challenges(challenges: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1391,6 +1948,10 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
     writeup_en = 0
     accepted_count = 0
     solved_count = 0
+    artifact_attempted_count = 0
+    artifact_accepted_count = 0
+    artifact_rejected_count = 0
+    artifact_blocked_count = 0
     for row in contest_events:
         event = str(row.get("event") or "")
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
@@ -1398,6 +1959,18 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         timestamp = _parse_timestamp(str(row.get("timestamp") or ""))
         if event == "claim" and challenge_id and timestamp:
             claim_times.setdefault(challenge_id, timestamp)
+        if event == "artifact_submit_attempted":
+            artifact_attempted_count += 1
+        elif event == "artifact_submit_accepted":
+            artifact_accepted_count += 1
+            accepted_count += 1
+            solved_count += 1
+            if challenge_id and timestamp and challenge_id in claim_times:
+                solve_durations.append((timestamp - claim_times[challenge_id]).total_seconds())
+        elif event == "artifact_submit_rejected":
+            artifact_rejected_count += 1
+        elif event == "artifact_submit_blocked":
+            artifact_blocked_count += 1
         if event == "submit" and str(data.get("status") or "") == "accepted":
             accepted_count += 1
             solved_count += 1
@@ -1431,8 +2004,12 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "claimed_count": sum(1 for row in contest_events if row.get("event") == "claim"),
         "solved_count": solved_count,
         "stalled_count": sum(1 for row in contest_events if row.get("event") == "stalled"),
-        "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit"),
+        "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit") + artifact_attempted_count,
         "accepted_count": accepted_count,
+        "artifact_submitted_count": artifact_attempted_count,
+        "artifact_accepted_count": artifact_accepted_count,
+        "artifact_rejected_count": artifact_rejected_count,
+        "artifact_blocked_count": artifact_blocked_count,
         "writeup_ko_count": writeup_ko,
         "writeup_en_count": writeup_en,
         "cleanup_count": sum(1 for row in contest_events if row.get("event") == "cleanup"),
@@ -1474,7 +2051,7 @@ def _public_challenge_index(board: Mapping[str, Any], events: list[dict[str, Any
         )
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
         event = str(row.get("event") or "")
-        if event in {"submit", "accepted", "solved", "external_solved"}:
+        if event in {"submit", "accepted", "solved", "external_solved", "artifact_submit_accepted"}:
             item["status"] = "solved"
         elif event == "stalled" and item.get("status") != "solved":
             item["status"] = "stalled"
@@ -1513,6 +2090,25 @@ def _attempts_total(events: list[dict[str, Any]]) -> int | None:
             total += int(value)
             seen = True
     return total if seen else None
+
+
+def _public_artifact_submissions(root: Path, contest_id: str) -> list[dict[str, Any]]:
+    public: list[dict[str, Any]] = []
+    for row in _read_jsonl(root / "submissions.jsonl"):
+        if row.get("contest_id") != contest_id or row.get("submit_type") != "artifact_upload":
+            continue
+        public.append(
+            {
+                "challenge_id": str(row.get("challenge_id") or ""),
+                "artifact_sha256": str(row.get("artifact_sha256") or ""),
+                "artifact_size": _number(row.get("artifact_size")),
+                "status": str(row.get("status") or ""),
+                "active_status": str(row.get("active_status") or ""),
+                "response_status": str(row.get("response_status") or ""),
+                "submitted_at": str(row.get("submitted_at") or row.get("timestamp") or ""),
+            }
+        )
+    return public
 
 
 def _render_public_solved(contest_id: str, challenges: Mapping[str, Mapping[str, Any]], root: Path) -> str:
@@ -1570,6 +2166,10 @@ def _render_public_regression(contest_id: str, summary: Mapping[str, Any]) -> st
         f"- solved_count: {summary.get('solved_count')}",
         f"- stalled_count: {summary.get('stalled_count')}",
         f"- accepted_count: {summary.get('accepted_count')}",
+        f"- artifact_submitted_count: {summary.get('artifact_submitted_count', 0)}",
+        f"- artifact_accepted_count: {summary.get('artifact_accepted_count', 0)}",
+        f"- artifact_rejected_count: {summary.get('artifact_rejected_count', 0)}",
+        f"- artifact_blocked_count: {summary.get('artifact_blocked_count', 0)}",
         f"- writeup_ko_count: {summary.get('writeup_ko_count')}",
         f"- writeup_en_count: {summary.get('writeup_en_count')}",
         f"- cleanup_count: {summary.get('cleanup_count')}",
@@ -1707,6 +2307,8 @@ def _render_writeup(
         f"- name: {name}",
         f"- category: {category}",
         f"- accepted_flag_hash: {solved.get('flag_hash', '')}",
+        f"- accepted_artifact_sha256: {solved.get('artifact_sha256', '')}",
+        f"- submit_type: {solved.get('submit_type', 'flag')}",
         "",
         f"## {headings['summary']}",
         "- TODO",

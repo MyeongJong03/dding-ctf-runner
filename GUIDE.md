@@ -213,8 +213,18 @@ ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-
 Submit an upload artifact:
 
 ```bash
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
 ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
 ```
+
+Artifact upload challenges, including rfc1149b-like wasm tasks, are metadata-first. Store the challenge submit metadata under the local operator state, then upload only to the official endpoint:
+
+```bash
+ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id rfc1149b --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --status-url https://example.invalid/status/rfc1149b --json
+ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id rfc1149b --artifact ./solution.wasm --confirm --json
+```
+
+The endpoint must be HTTP/HTTPS, must not embed credentials or secret-bearing query parameters, and must match the origin of the configured platform profile `base_url`. If metadata and `--endpoint` are both missing, `upload-submit` records a planned/blocked local submission and does not perform live network traffic. Successful and failed upload attempts append public-safe local records to `submissions.jsonl` with artifact SHA-256, size, submit timestamp, response status, and active status.
 
 Mark stalled:
 
@@ -294,9 +304,9 @@ ctfctl interactive metrics dashboard --json
 ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
 ```
 
-`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, and observed token totals when present. They must not include raw flags, writeup bodies, exploit bodies, cookies, sessions, browser storage, private keys, or auth material.
+`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, observed token totals when present, and artifact upload SHA-256/size/status when present. They must not include raw flags, writeup bodies, exploit bodies, artifact contents, upload endpoints, local artifact paths, cookies, sessions, browser storage, private keys, raw responses, or auth material.
 
-During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: memo/attempts/next_steps -> metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
+During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit or accepted/active artifact upload -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: memo/attempts/next_steps -> metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
 
 ## 9. Callback, Docker, Submit, And Cleanup Helpers
 
