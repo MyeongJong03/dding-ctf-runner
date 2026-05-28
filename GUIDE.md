@@ -162,6 +162,8 @@ Each solver should:
 - claim the next challenge
 - keep self memos current to prevent context drift
 
+`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive claim` only returns canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+
 ## 6. Interactive Commands
 
 Board:
@@ -175,6 +177,8 @@ Claim next challenge:
 ```bash
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ```
+
+The returned `challenge_id`, name, path, memos, and writeup paths are canonical even when the platform also published static or alias rows for the same task.
 
 Claim a specific challenge:
 
@@ -237,6 +241,8 @@ Record a challenge solved outside this machine:
 ```bash
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
 ```
+
+`external-solved` accepts a canonical ID, canonical name, alias, static slug, or artifact source. It resolves to the canonical challenge, marks it `external_solved`/`solved_by_external`, writes local `external_solved.txt` entries, and releases any claim locks for the canonical challenge and aliases. Use this when a teammate solves a problem and the platform sync does not automatically expose team-solved state.
 
 Write accepted-only writeups:
 

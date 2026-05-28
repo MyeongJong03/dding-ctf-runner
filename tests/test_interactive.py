@@ -94,6 +94,108 @@ def test_interactive_sync_marks_static_aliases_not_default_targets(tmp_path: Pat
     assert claim["challenge_id"] == "birdhouse"
 
 
+def test_interactive_sync_defcon_fixture_canonicalizes_aliases(tmp_path: Path, monkeypatch):
+    _sync_defcon_fixture(tmp_path, monkeypatch)
+    root = tmp_path / "contests" / "defcon" / "operator"
+    board = json.loads((root / "board.json").read_text(encoding="utf-8"))
+    status = _run_json(["interactive", "board", "--contest-id", "defcon", "--json"])
+
+    ids = {item["challenge_id"] for item in board["challenges"]}
+    mfi = next(item for item in board["challenges"] if item["challenge_id"] == "my-favorite-instructions")
+
+    assert board["canonical_counts"]["canonical_count"] == 6
+    assert board["canonical_counts"]["alias_count"] == 9
+    assert board["canonical_map"]["birdhouse-static"] == "birdhouse"
+    assert board["canonical_map"]["FavoriteInstructions"] == "my-favorite-instructions"
+    assert board["canonical_map"]["favorite-static"] == "my-favorite-instructions"
+    assert board["canonical_map"]["twobirdtwocan"] == "2bird2can"
+    assert board["canonical_map"]["waybird-machine"] == "waybird-machine-main"
+    assert board["canonical_map"]["livectf-phase1"] == "LiveCTF"
+    assert "favorite-static" in mfi["artifact_sources"]
+    assert "my-favorite-instructions-static" in mfi["artifact_sources"]
+    assert "FavoriteInstructions" in mfi["aliases"]
+    assert "favorite-static" not in ids
+    assert "FavoriteInstructions" not in ids
+    assert status["canonical_count"] == 6
+    assert status["alias_count"] == 9
+    assert status["claimable_count"] == 6
+    assert status["challenges"]["todo"][0]["aliases"]
+    assert "artifact_sources" in status["challenges"]["todo"][0]
+
+
+def test_claim_specific_alias_returns_canonical_and_duplicate_override_works(tmp_path: Path, monkeypatch):
+    _sync_defcon_fixture(tmp_path, monkeypatch)
+
+    first = _run_json(["interactive", "claim", "--contest-id", "defcon", "--agent", "a1", "--challenge", "FavoriteInstructions", "--json"])
+    duplicate = _run_json_fail(["interactive", "claim", "--contest-id", "defcon", "--agent", "a2", "--challenge", "my-favorite-instructions", "--json"])
+    allowed = _run_json(
+        [
+            "interactive",
+            "claim",
+            "--contest-id",
+            "defcon",
+            "--agent",
+            "a2",
+            "--challenge",
+            "favorite-static",
+            "--allow-duplicate",
+            "--json",
+        ]
+    )
+
+    assert first["status"] == "claimed"
+    assert first["challenge_id"] == "my-favorite-instructions"
+    assert first["name"] == "My Favorite Instructions"
+    assert "FavoriteInstructions" not in first["path"]
+    assert duplicate["status"] == "blocked"
+    assert allowed["status"] == "claimed"
+    assert allowed["challenge_id"] == "my-favorite-instructions"
+
+
+def test_external_solved_alias_marks_canonical_and_releases_alias_locks(tmp_path: Path, monkeypatch):
+    _sync_defcon_fixture(tmp_path, monkeypatch)
+    root = tmp_path / "contests" / "defcon" / "operator"
+    _run_json(["interactive", "claim", "--contest-id", "defcon", "--agent", "a1", "--challenge", "Birdhouse", "--json"])
+
+    marked = _run_json(["interactive", "external-solved", "--contest-id", "defcon", "--challenge", "birdhouse-static", "--json"])
+    board = _run_json(["interactive", "board", "--contest-id", "defcon", "--json"])
+    birdhouse = next(item for item in board["challenges"]["solved"] if item["challenge_id"] == "birdhouse")
+    external_text = (root / "external_solved.txt").read_text(encoding="utf-8")
+
+    assert marked["status"] == "ok"
+    assert marked["challenge_id"] == "birdhouse"
+    assert marked["canonical_name"] == "Birdhouse"
+    assert marked["released_count"] >= 1
+    assert not list((root / "claims").glob("*.lock"))
+    assert birdhouse["status"] == "external_solved"
+    assert birdhouse["solved_by_external"] is True
+    assert "birdhouse-static" in external_text
+    assert "Birdhouse" in external_text
+
+
+def test_sync_platform_solved_status_excludes_team_solved_without_raw_submission(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeSolvedSyncPlatform())
+    raw_marker = "TOKEN_SYNTHETIC_SUBMISSION_MARKER"
+
+    result, output = _run_json_with_output(["interactive", "sync", "--contest-id", "solved-sync", "--profile", str(profile), "--live", "--json"])
+    claim = _run_json(["interactive", "claim", "--contest-id", "solved-sync", "--agent", "a1", "--json"])
+    root = tmp_path / "contests" / "solved-sync" / "operator"
+    board_text = (root / "board.json").read_text(encoding="utf-8")
+    board = json.loads(board_text)
+
+    assert result["status"] == "ok"
+    assert result["claimable_count"] == 0
+    assert claim["status"] == "empty"
+    assert board["challenges"][0]["status"] == "external_solved"
+    assert board["challenges"][0]["solved_by_external"] is True
+    assert board["challenges"][0]["platform_submission"]["status"] == "correct"
+    assert raw_marker not in output
+    assert raw_marker not in board_text
+
+
 def test_stalled_records_note_and_releases_claim(tmp_path: Path, monkeypatch):
     _seed_board(tmp_path, monkeypatch)
     _run_json(["interactive", "claim", "--contest-id", "demo", "--agent", "a1", "--json"])
@@ -481,6 +583,94 @@ class FakeSyncPlatform:
                 ]
             },
         )
+
+
+class FakeDefconSyncPlatform:
+    def discover_challenges(self, live: bool = False) -> PlatformAction:
+        return PlatformAction(
+            action="discover_challenges",
+            live=live,
+            network=live,
+            status="ok",
+            details={
+                "challenges": [
+                    _static_shell("birdhouse-static"),
+                    {"challenge_id": "birdhouse", "name": "Birdhouse", "category": "web", "statement": "Real Birdhouse challenge with enough detail to solve.", "file_count": 1},
+                    _static_shell("favorite-static"),
+                    {
+                        "challenge_id": "FavoriteInstructions",
+                        "name": "FavoriteInstructions",
+                        "category": "misc",
+                        "statement": "Alias page for My Favorite Instructions.",
+                        "file_count": 0,
+                    },
+                    _static_shell("my-favorite-instructions-static"),
+                    {
+                        "challenge_id": "my-favorite-instructions",
+                        "name": "My Favorite Instructions",
+                        "category": "misc",
+                        "statement": "Real favorite instructions challenge with actual solver-relevant details.",
+                        "file_count": 1,
+                    },
+                    {"challenge_id": "stork", "name": "stork", "category": "rev", "statement": "DEF CON CTF Quals 2026", "file_count": 0},
+                    {"challenge_id": "Stork", "name": "Stork", "category": "rev", "statement": "Real Stork challenge statement.", "file_count": 1},
+                    {"challenge_id": "twobirdtwocan", "name": "twobirdtwocan", "category": "pwn", "statement": "DEF CON CTF Quals 2026", "file_count": 0},
+                    {"challenge_id": "2bird2can", "name": "2bird2can", "category": "pwn", "statement": "Real 2bird2can challenge statement.", "file_count": 1},
+                    {"challenge_id": "waybird-machine", "name": "waybird-machine", "category": "crypto", "statement": "DEF CON CTF Quals 2026", "file_count": 0},
+                    {
+                        "challenge_id": "waybird-machine-main",
+                        "name": "Waybird Machine",
+                        "category": "crypto",
+                        "statement": "Real Waybird Machine challenge statement.",
+                        "file_count": 1,
+                    },
+                    {"challenge_id": "livectf", "name": "livectf", "category": "misc", "statement": "DEF CON CTF Quals 2026", "file_count": 0},
+                    {"challenge_id": "livectf-phase1", "name": "livectf-phase1", "category": "misc", "statement": "phase metadata", "file_count": 0},
+                    {"challenge_id": "LiveCTF", "name": "LiveCTF", "category": "misc", "statement": "Real LiveCTF challenge statement.", "file_count": 1},
+                ]
+            },
+        )
+
+
+class FakeSolvedSyncPlatform:
+    def discover_challenges(self, live: bool = False) -> PlatformAction:
+        return PlatformAction(
+            action="discover_challenges",
+            live=live,
+            network=live,
+            status="ok",
+            details={
+                "challenges": [
+                    {
+                        "challenge_id": "team-solved",
+                        "name": "Team Solved",
+                        "category": "misc",
+                        "statement": "Already solved by another teammate.",
+                        "solved": True,
+                        "submission": {"status": "correct", "candidate": "TOKEN_SYNTHETIC_SUBMISSION_MARKER"},
+                    }
+                ]
+            },
+        )
+
+
+def _static_shell(challenge_id: str) -> dict:
+    return {
+        "challenge_id": challenge_id,
+        "name": challenge_id,
+        "category": "misc",
+        "statement": "DEF CON CTF Quals 2026",
+        "file_count": 0,
+        "links": [{"url": "/favicon.ico"}, {"url": "/assets/style.css"}],
+    }
+
+
+def _sync_defcon_fixture(tmp_path: Path, monkeypatch) -> dict:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: defcon\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeDefconSyncPlatform())
+    return _run_json(["interactive", "sync", "--contest-id", "defcon", "--profile", str(profile), "--live", "--json"])
 
 
 class ArtifactUploadServer:

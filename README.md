@@ -65,7 +65,9 @@ Paste one generated prompt into each Codex terminal. Recommended width:
 - Windows WSL: up to 6 Codex terminals.
 - MacBook: up to 4 Codex terminals.
 
-Inside the same computer, duplicate claims are blocked by default. Use `ctfctl interactive claim --allow-duplicate` only when you intentionally want multiple local Codex sessions on the same problem. Duplicate claims across different computers are not coordinated.
+`interactive sync` builds a canonical challenge map before solvers claim work. Static shell pages, slug aliases, spacing/case variants, and phase metadata are folded into the canonical challenge's `aliases`, `artifact_sources`, and `source_ids` in `board.json`, then excluded from default claims. The sync JSON reports `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+
+Inside the same computer, duplicate claims are blocked by default on the canonical challenge. Use `ctfctl interactive claim --allow-duplicate` only when you intentionally want multiple local Codex sessions on the same problem. Duplicate claims across different computers are not coordinated.
 
 ## Solver Loop
 
@@ -81,6 +83,12 @@ ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --cate
 ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
 ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
+```
+
+When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, or alias:
+
+```bash
+ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id-or-alias> --json
 ```
 
 Writeups are accepted-only. Accepted challenges produce both Korean and English files named:

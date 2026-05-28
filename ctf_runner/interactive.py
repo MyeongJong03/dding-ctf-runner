@@ -102,19 +102,41 @@ def sync_operator(
             warnings.extend(str(item) for item in text_result.get("warnings") or [])
 
     canonical = _canonicalize_challenges(source_challenges)
-    existing = {str(item.get("challenge_id")): dict(item) for item in board.get("challenges", []) if item.get("challenge_id")}
+    previous_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
+    previous_by_key: dict[str, dict[str, Any]] = {}
+    for previous in previous_items:
+        for key in _challenge_keys(previous):
+            previous_by_key.setdefault(key, previous)
+
+    merged_challenges: list[dict[str, Any]] = []
+    source_keys = {_normalize(str(key)) for key in canonical["map"].keys()}
+    canonical_ids = {_normalize(str(item.get("challenge_id") or "")) for item in canonical["challenges"]}
     for item in canonical["challenges"]:
-        previous = existing.get(item["challenge_id"], {})
-        merged = {**previous, **item}
-        merged.setdefault("status", previous.get("status") or "todo")
+        previous = _previous_challenge(previous_by_key, item)
+        merged = _merge_challenge_entry(previous, item)
         merged["path"] = _challenge_path(contest_id, merged).as_posix()
-        existing[item["challenge_id"]] = merged
+        merged_challenges.append(merged)
         _ensure_challenge_memos(_challenge_path(contest_id, merged))
+
+    for previous in previous_items:
+        previous_id = _normalize(str(previous.get("challenge_id") or previous.get("name") or ""))
+        if not previous_id or previous_id in source_keys or previous_id in canonical_ids:
+            continue
+        if previous.get("is_alias") or previous.get("is_static_alias") or previous.get("canonical_id") not in (None, "", previous.get("challenge_id")):
+            continue
+        preserved = _normalize_challenge_entry(previous)
+        preserved["path"] = _challenge_path(contest_id, preserved).as_posix()
+        merged_challenges.append(preserved)
 
     board["profile_path"] = _display(Path(profile).expanduser())
     board["updated_at"] = utc_now()
-    board["challenges"] = sorted(existing.values(), key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or "")))
+    board["canonical_map"] = canonical["map"]
+    board["canonical_counts"] = canonical["counts"]
+    board["challenges"] = sorted(merged_challenges, key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or "")))
     _apply_runtime_statuses(root, board)
+    for challenge in board["challenges"]:
+        if challenge.get("solved_by_external"):
+            _release_locks_for_item(root, agent=None, item=challenge)
     _write_board(root, board)
     _write_board_md(root, board)
 
@@ -122,7 +144,7 @@ def sync_operator(
     ingest_results: list[dict[str, Any]] = []
     if live and (download or ingest):
         for challenge in board["challenges"]:
-            if challenge.get("is_alias") or challenge.get("is_static_alias"):
+            if not _claimable_source(challenge):
                 continue
             challenge_id = str(challenge.get("challenge_id") or "")
             if download:
@@ -158,12 +180,15 @@ def sync_operator(
     return {
         "status": "ok" if discover_action.status in {"ok", "planned"} else discover_action.status,
         "contest_id": contest_id,
-        "challenge_count": len(board["challenges"]),
-        "target_count": sum(1 for item in board["challenges"] if not item.get("is_alias") and not item.get("is_static_alias")),
-        "alias_count": sum(1 for item in board["challenges"] if item.get("is_alias") or item.get("is_static_alias")),
+        "challenge_count": len(source_challenges),
+        "canonical_count": canonical["counts"]["canonical_count"],
+        "target_count": canonical["counts"]["claimable_count"],
+        "alias_count": canonical["counts"]["alias_count"],
+        "skipped_static_count": canonical["counts"]["skipped_static_count"],
+        "claimable_count": sum(1 for item in board["challenges"] if _claimable(root, item)),
         "canonical_map": canonical["map"],
         "warnings": sorted(set(warnings + canonical["warnings"])),
-        "discover": discover_payload,
+        "discover": _interactive_discover_public(discover_payload),
         "download": download_results,
         "ingest": ingest_results,
         "board_path": _display(root / "board.json"),
@@ -182,12 +207,28 @@ def board_status(contest_id: str) -> dict[str, Any]:
         status = _challenge_status(root, item)
         summary = _challenge_public(item)
         buckets.setdefault(status, []).append(summary)
+    canonical_count = sum(1 for item in board.get("challenges", []) if not item.get("is_alias"))
+    alias_count = sum(len(_list_values(item.get("aliases"))) for item in board.get("challenges", []) if isinstance(item, Mapping))
+    artifact_source_count = sum(len(_list_values(item.get("artifact_sources"))) for item in board.get("challenges", []) if isinstance(item, Mapping))
+    skipped_static_count = sum(1 for item in board.get("challenges", []) if item.get("is_static_shell") or item.get("is_static_alias")) + artifact_source_count
+    claimable_count = sum(1 for item in board.get("challenges", []) if _claimable(root, item))
     return {
         "status": "ok",
         "contest_id": contest_id,
         "operator_root": _display(root),
-        "counts": {key: len(value) for key, value in buckets.items()},
+        "canonical_count": canonical_count,
+        "alias_count": alias_count,
+        "skipped_static_count": skipped_static_count,
+        "claimable_count": claimable_count,
+        "counts": {
+            **{key: len(value) for key, value in buckets.items()},
+            "canonical_count": canonical_count,
+            "alias_count": alias_count,
+            "skipped_static_count": skipped_static_count,
+            "claimable_count": claimable_count,
+        },
         "challenges": buckets,
+        "canonical_map": board.get("canonical_map", {}),
     }
 
 
@@ -210,6 +251,8 @@ def claim_challenge(
         status = _challenge_status(root, item)
         if status in {"solved", "stalled", "skipped"}:
             return {"status": "empty", "contest_id": contest_id, "reason": f"challenge_{status}", "challenge_id": item.get("challenge_id")}
+        if not _claimable_source(item):
+            return {"status": "empty", "contest_id": contest_id, "reason": "challenge_not_claimable", "challenge_id": item.get("challenge_id")}
         candidates = [item]
     else:
         candidates = [item for item in board.get("challenges", []) if _claimable(root, item)]
@@ -312,16 +355,32 @@ def mark_external_solved(contest_id: str, *, challenge: str) -> dict[str, Any]:
     item = _find_challenge(board, challenge)
     if item is None:
         return {"status": "not_found", "contest_id": contest_id, "challenge": challenge}
-    line = str(item.get("challenge_id") or item.get("name") or challenge)
+    lines = _external_solved_lines(item, challenge)
     existing = {row.strip() for row in (root / "external_solved.txt").read_text(encoding="utf-8").splitlines() if row.strip()}
-    if line not in existing:
-        _append_text(root / "external_solved.txt", line + "\n")
+    for line in lines:
+        if line not in existing:
+            _append_text(root / "external_solved.txt", line + "\n")
+            existing.add(line)
     item["status"] = "external_solved"
-    released = _release_locks(root, agent=None, challenge=challenge)
+    item["solved_by_external"] = True
+    released = _release_locks_for_item(root, agent=None, item=item)
     _write_board(root, board)
     _write_board_md(root, board)
-    _record_metrics_event(root, contest_id=contest_id, event="external_solved", challenge_id=str(item.get("challenge_id") or challenge), data={"released_count": released})
-    return {"status": "ok", "contest_id": contest_id, "challenge_id": item.get("challenge_id"), "released_count": released}
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="external_solved",
+        challenge_id=str(item.get("challenge_id") or challenge),
+        data={"released_count": released, "matched": redact_text(challenge)},
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": item.get("challenge_id"),
+        "canonical_id": item.get("canonical_id") or item.get("challenge_id"),
+        "canonical_name": item.get("canonical_name") or item.get("name"),
+        "released_count": released,
+    }
 
 
 def submit_flag_file(contest_id: str, *, challenge_id: str, flag_file: str | Path, confirm: bool) -> dict[str, Any]:
@@ -372,7 +431,7 @@ def submit_flag_file(contest_id: str, *, challenge_id: str, flag_file: str | Pat
         item["status"] = "solved"
         item["solved_at"] = solved["timestamp"]
         item["flag_hash"] = flag_digest
-        _release_locks(root, agent=None, challenge=str(item.get("challenge_id") or challenge_id))
+        _release_locks_for_item(root, agent=None, item=item)
         _write_board(root, board)
         _write_board_md(root, board)
     _record_metrics_event(
@@ -535,7 +594,7 @@ def upload_submit(
                 item["status"] = "solved"
                 item["solved_at"] = timestamp
                 item["artifact_sha256"] = record.get("artifact_sha256")
-            _release_locks(root, agent=None, challenge=challenge_key)
+            _release_locks_for_item(root, agent=None, item=item)
             _write_board(root, board)
             _write_board_md(root, board)
         return {
@@ -1187,10 +1246,20 @@ def _write_board_md(root: Path, board: Mapping[str, Any]) -> None:
     lines = [f"# {board.get('contest_id')} Board", "", "| Status | Category | Challenge | Notes |", "| --- | --- | --- | --- |"]
     for item in board.get("challenges", []):
         notes = []
+        if not item.get("claimable", True):
+            notes.append("not claimable")
+        if item.get("is_static_shell"):
+            notes.append("static shell")
         if item.get("is_static_alias"):
             notes.append("static alias")
         if item.get("is_alias"):
             notes.append(f"alias of {item.get('canonical_id')}")
+        aliases = _list_values(item.get("aliases"))
+        if aliases:
+            notes.append(f"{len(aliases)} aliases")
+        artifact_sources = _list_values(item.get("artifact_sources"))
+        if artifact_sources:
+            notes.append(f"{len(artifact_sources)} artifact sources")
         if item.get("claimed_by"):
             notes.append(f"claimed by {item.get('claimed_by')}")
         lines.append(
@@ -1529,66 +1598,137 @@ def _multipart_quote(value: str) -> str:
 
 def _canonicalize_challenges(challenges: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     raw = [_challenge_from_source(item) for item in challenges if item]
-    canonical_by_key: dict[str, dict[str, Any]] = {}
-    warnings: list[str] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
     for item in raw:
-        base = _canonical_name(str(item.get("name") or item.get("challenge_id") or ""))
-        key = _normalize(base)
-        existing = canonical_by_key.get(key)
-        is_static = _is_static_alias(item)
-        if existing is None or (existing.get("is_static_alias") and not is_static):
-            canonical = dict(item)
-            canonical["canonical_id"] = canonical.get("challenge_id")
-            canonical["is_alias"] = False
-            canonical["is_static_alias"] = is_static
-            canonical["aliases"] = []
-            canonical_by_key[key] = canonical
-            existing = canonical
-        if item.get("challenge_id") != existing.get("challenge_id"):
-            alias = dict(item)
-            alias["canonical_id"] = existing.get("challenge_id")
-            alias["is_alias"] = True
-            alias["is_static_alias"] = True if is_static else bool(alias.get("is_static_alias"))
-            alias["status"] = "skipped"
-            existing.setdefault("aliases", []).append(alias.get("challenge_id"))
-            warnings.append(f"alias:{alias.get('challenge_id')}->{existing.get('challenge_id')}")
-            canonical_by_key[_normalize(str(alias.get("challenge_id")))] = alias
-    result = list(canonical_by_key.values())
-    return {"challenges": result, "map": {str(item.get("challenge_id")): str(item.get("canonical_id") or item.get("challenge_id")) for item in result}, "warnings": warnings}
+        key = _normalize(str(item.get("canonical_name") or item.get("name") or item.get("challenge_id") or ""))
+        if not key:
+            continue
+        groups.setdefault(key, []).append(item)
+
+    result: list[dict[str, Any]] = []
+    canonical_map: dict[str, str] = {}
+    warnings: list[str] = []
+    alias_count = 0
+    skipped_static_count = 0
+    for _key, group in groups.items():
+        canonical_source = max(group, key=_canonical_source_score)
+        canonical = _canonical_entry(canonical_source)
+        aliases: list[str] = []
+        artifact_sources: list[str] = []
+        source_ids: list[str] = []
+        platform_solved = bool(canonical.get("platform_solved"))
+        submit_metadata = canonical.get("platform_submission") if isinstance(canonical.get("platform_submission"), Mapping) else {}
+
+        for source in group:
+            source_id = str(source.get("challenge_id") or source.get("name") or "").strip()
+            if source_id:
+                source_ids.append(source_id)
+                canonical_map[source_id] = str(canonical["challenge_id"])
+            if source.get("slug"):
+                canonical_map[str(source["slug"])] = str(canonical["challenge_id"])
+            platform_solved = platform_solved or bool(source.get("platform_solved"))
+            if isinstance(source.get("platform_submission"), Mapping):
+                submit_metadata = {**dict(submit_metadata), **dict(source["platform_submission"])}
+
+            if source is canonical_source:
+                continue
+            alias_count += 1
+            for alias in _source_alias_values(source):
+                aliases.append(alias)
+                canonical_map[alias] = str(canonical["challenge_id"])
+            if _is_artifact_source(source):
+                skipped_static_count += 1
+                for alias in _source_alias_values(source):
+                    artifact_sources.append(alias)
+            warnings.append(f"alias:{source_id}->{canonical['challenge_id']}")
+
+        if canonical_source.get("is_static_shell"):
+            skipped_static_count += 1
+        canonical["aliases"] = _dedupe_strings(aliases)
+        canonical["artifact_sources"] = _dedupe_strings(artifact_sources)
+        canonical["source_ids"] = _dedupe_strings(source_ids)
+        canonical["platform_solved"] = platform_solved
+        if submit_metadata:
+            canonical["platform_submission"] = dict(submit_metadata)
+        if platform_solved:
+            canonical["status"] = "external_solved"
+            canonical["solved_by_external"] = True
+        canonical["claimable"] = _claimable_source(canonical)
+        result.append(canonical)
+
+    counts = {
+        "canonical_count": len(result),
+        "alias_count": alias_count,
+        "skipped_static_count": skipped_static_count,
+        "claimable_count": sum(1 for item in result if _claimable_source(item)),
+    }
+    return {"challenges": result, "map": canonical_map, "warnings": warnings, "counts": counts}
 
 
 def _challenge_from_source(item: Mapping[str, Any]) -> dict[str, Any]:
     challenge_id = str(item.get("challenge_id") or item.get("id") or item.get("slug") or item.get("name") or "").strip()
     name = str(item.get("name") or challenge_id).strip()
     metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+    statement = redact_text(str(item.get("statement") or item.get("description") or metadata.get("statement") or "")).strip()
+    attachments = _source_attachments(item)
+    links = _source_links(item)
+    file_count = _source_file_count(item, attachments)
+    platform_status = _source_platform_status(item)
+    platform_submission = _source_submission_summary(item)
+    platform_solved = _source_platform_solved(item, platform_status=platform_status, platform_submission=platform_submission)
+    canonical_name = _canonical_name(str(name or challenge_id))
+    is_static_shell = _is_static_shell_source(
+        {
+            "challenge_id": challenge_id,
+            "name": name,
+            "statement": statement,
+            "file_count": file_count,
+            "links": links,
+        }
+    )
     return {
         "challenge_id": challenge_id,
         "name": name,
+        "slug": str(item.get("slug") or "").strip(),
         "category": str(item.get("category") or metadata.get("category") or ""),
         "points": item.get("points") or item.get("value"),
         "solves": item.get("solves"),
-        "statement": redact_text(str(item.get("statement") or item.get("description") or metadata.get("statement") or "")),
-        "has_files": bool(item.get("has_files") or item.get("file_count") or item.get("_attachments_private")),
+        "statement": statement,
+        "statement_bytes": len(statement.encode("utf-8")),
+        "has_files": file_count > 0,
+        "file_count": file_count,
+        "attachment_count": file_count,
+        "link_count": len(links),
+        "platform_solved": platform_solved,
+        "platform_status": platform_status,
+        "platform_submission": platform_submission,
+        "canonical_id": challenge_id,
+        "canonical_name": canonical_name,
+        "is_static_shell": is_static_shell,
+        "is_static_alias": is_static_shell,
+        "claimable": not is_static_shell,
+        "solved_by_external": False,
         "tags": list(item.get("tags") or []),
         "priority": 100,
-        "status": "todo",
+        "status": "external_solved" if platform_solved else "skipped" if is_static_shell else "todo",
     }
 
 
 def _canonical_name(value: str) -> str:
     lowered = value.strip()
     lowered = re.sub(r"[-_\s]*static$", "", lowered, flags=re.IGNORECASE)
+    lowered = re.sub(r"[-_\s]*phase[-_\s]*\d+$", "", lowered, flags=re.IGNORECASE)
     known = {
         "birdhouse": "Birdhouse",
         "myfavoriteinstructions": "My Favorite Instructions",
         "favoriteinstructions": "My Favorite Instructions",
+        "favorite": "My Favorite Instructions",
         "stork": "Stork",
         "twobirdtwocan": "2bird2can",
         "2bird2can": "2bird2can",
         "waybirdmachine": "Waybird Machine",
         "livectf": "LiveCTF",
         "livectfphase1": "LiveCTF",
-        "favorite": "Favorite",
     }
     compact = _normalize(lowered)
     if compact in known:
@@ -1596,14 +1736,275 @@ def _canonical_name(value: str) -> str:
     return re.sub(r"[_-]+", " ", lowered).strip().title()
 
 
-def _is_static_alias(item: Mapping[str, Any]) -> bool:
-    ident = str(item.get("challenge_id") or item.get("name") or "").lower()
-    statement = str(item.get("statement") or "").strip().lower()
-    if ident.endswith("-static") or ident in {"favorite-static", "favoriteinstructions", "twobirdtwocan", "waybird-machine", "stork"}:
+def _canonical_entry(source: Mapping[str, Any]) -> dict[str, Any]:
+    canonical = dict(source)
+    canonical["canonical_id"] = str(source.get("challenge_id") or source.get("name") or "")
+    canonical["canonical_name"] = str(source.get("canonical_name") or source.get("name") or canonical["canonical_id"])
+    canonical["is_alias"] = False
+    canonical["is_static_alias"] = False
+    canonical.setdefault("aliases", [])
+    canonical.setdefault("artifact_sources", [])
+    canonical.setdefault("source_ids", [canonical["canonical_id"]])
+    canonical["claimable"] = not bool(canonical.get("is_static_shell"))
+    if canonical.get("is_static_shell"):
+        canonical["status"] = "skipped"
+    return canonical
+
+
+def _canonical_source_score(item: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
+    statement_bytes = int(item.get("statement_bytes") or 0)
+    display = str(item.get("name") or item.get("challenge_id") or "")
+    ident = str(item.get("challenge_id") or "")
+    score = 0
+    if item.get("is_static_shell"):
+        score -= 1000
+    if item.get("has_files") or int(item.get("attachment_count") or 0) > 0:
+        score += 300
+    score += min(statement_bytes, 1200) // 8
+    if _looks_display_name(display, ident):
+        score += 120
+    if _is_phase_metadata(item):
+        score -= 200
+    if str(ident).lower().endswith("-static"):
+        score -= 200
+    if item.get("platform_solved"):
+        score += 10
+    return (score, len(display), statement_bytes, -len(ident), display)
+
+
+def _looks_display_name(name: str, challenge_id: str) -> bool:
+    text = str(name or "").strip()
+    ident = str(challenge_id or "").strip()
+    if not text:
+        return False
+    if text != ident and (" " in text or any(char.isupper() for char in text)):
         return True
-    if len(statement) < 80 and any(token in statement for token in ("favicon", ".css", "stylesheet")):
+    return bool(any(char.isupper() for char in text) and not re.fullmatch(r"[a-z0-9_-]+", text))
+
+
+def _source_alias_values(source: Mapping[str, Any]) -> list[str]:
+    values = [
+        str(source.get("challenge_id") or "").strip(),
+        str(source.get("name") or "").strip(),
+        str(source.get("slug") or "").strip(),
+    ]
+    return _dedupe_strings(value for value in values if value)
+
+
+def _is_artifact_source(source: Mapping[str, Any]) -> bool:
+    ident = str(source.get("challenge_id") or source.get("name") or "").lower()
+    return bool(source.get("is_static_shell") or ident.endswith("-static"))
+
+
+def _is_static_shell_source(item: Mapping[str, Any]) -> bool:
+    ident = str(item.get("challenge_id") or item.get("name") or "").strip().lower()
+    statement = str(item.get("statement") or "").strip()
+    statement_lower = statement.lower()
+    statement_bytes = len(statement.encode("utf-8"))
+    file_count = int(item.get("file_count") or item.get("attachment_count") or 0)
+    links = list(item.get("links") or [])
+    if ident.endswith("-static"):
+        return True
+    if file_count > 0:
+        return False
+    if statement_bytes <= 120 and links and _links_are_only_static_assets(links):
+        return True
+    generic_titles = {"def con ctf quals 2026", "defcon ctf quals 2026", "def con ctf quals", "defcon ctf quals"}
+    if statement_lower in generic_titles and links and _links_are_only_static_assets(links):
         return True
     return False
+
+
+def _is_phase_metadata(item: Mapping[str, Any]) -> bool:
+    text = " ".join(str(item.get(key) or "") for key in ("challenge_id", "name", "slug")).lower()
+    return bool(re.search(r"(?:^|[-_\s])phase[-_\s]*\d+$", text))
+
+
+def _source_attachments(item: Mapping[str, Any]) -> list[str]:
+    raw = item.get("attachments")
+    if raw is None:
+        raw = item.get("_attachments_private")
+    if raw is None:
+        raw = item.get("files")
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    attachments: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            text = str(value.get("filename") or value.get("name") or value.get("source") or value.get("url") or value.get("path") or "").strip()
+        else:
+            text = str(value or "").strip()
+        if text:
+            attachments.append(redact_text(text)[:200])
+    return _dedupe_strings(attachments)
+
+
+def _source_links(item: Mapping[str, Any]) -> list[str]:
+    raw = item.get("links")
+    if raw is None:
+        raw = item.get("_links_private")
+    if raw is None:
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    links: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            text = " ".join(
+                str(value.get(key) or "").strip()
+                for key in ("label", "text", "filename", "name", "rel", "source", "url", "href")
+                if value.get(key)
+            )
+        else:
+            text = str(value or "").strip()
+        if text:
+            links.append(redact_text(text)[:300])
+    return _dedupe_strings(links)
+
+
+def _source_file_count(item: Mapping[str, Any], attachments: list[str]) -> int:
+    for key in ("attachment_count", "file_count"):
+        value = _int_value(item.get(key))
+        if value is not None:
+            return max(0, value)
+    if attachments:
+        return len(attachments)
+    return 1 if item.get("has_files") else 0
+
+
+def _source_platform_status(item: Mapping[str, Any]) -> str:
+    for key in ("platform_status", "state", "phase", "result"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return redact_text(value)[:120]
+    value = item.get("status")
+    if isinstance(value, str) and value.strip().lower() not in {"todo", "new"}:
+        return redact_text(value.strip())[:120]
+    return ""
+
+
+def _source_submission_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    raw = None
+    for key in ("submission", "last_submission", "submission_result", "submit_result"):
+        if item.get(key) is not None:
+            raw = item.get(key)
+            break
+    status = str(item.get("submission_status") or item.get("submit_status") or "").strip()
+    summary: dict[str, Any] = {}
+    if isinstance(raw, Mapping):
+        for key in ("status", "state", "result", "active_status", "submitted_at", "timestamp"):
+            value = raw.get(key)
+            if value is None:
+                continue
+            summary[key] = redact_text(str(value))[:160]
+        summary["present"] = True
+    elif isinstance(raw, bool):
+        summary["present"] = raw
+    elif isinstance(raw, str) and raw.strip():
+        lowered = raw.strip().lower()
+        if lowered in {"accepted", "correct", "solved", "already_solved", "rejected", "incorrect", "wrong", "pending", "queued"}:
+            summary["status"] = lowered
+        summary["present"] = True
+    if status:
+        summary["status"] = redact_text(status)[:120]
+        summary["present"] = True
+    return summary
+
+
+def _source_platform_solved(item: Mapping[str, Any], *, platform_status: str, platform_submission: Mapping[str, Any]) -> bool:
+    solved = item.get("solved")
+    if solved is None:
+        solved = item.get("solved_by_me", item.get("completed"))
+    if isinstance(solved, bool):
+        return solved
+    if solved is not None and str(solved).strip().lower() in {"1", "true", "yes", "solved", "accepted", "correct", "completed"}:
+        return True
+    status_text = " ".join(
+        str(value or "")
+        for value in (
+            platform_status,
+            platform_submission.get("status"),
+            platform_submission.get("state"),
+            platform_submission.get("result"),
+        )
+    ).lower()
+    if any(token in status_text for token in ("unsolved", "not solved", "incorrect", "wrong", "rejected")):
+        return False
+    status_words = set(re.sub(r"[^a-z0-9]+", " ", status_text).split())
+    return bool(status_words & {"accepted", "correct", "solved", "completed"} or "already_solved" in status_text)
+
+
+def _links_are_only_static_assets(links: Iterable[Any]) -> bool:
+    seen = False
+    for link in links:
+        text = str(link or "").strip().lower()
+        if not text:
+            continue
+        seen = True
+        if not any(token in text for token in ("favicon", ".css", "stylesheet", "style.css", "icon", "manifest")):
+            return False
+    return seen
+
+
+def _previous_challenge(previous_by_key: Mapping[str, dict[str, Any]], item: Mapping[str, Any]) -> dict[str, Any]:
+    preferred = [
+        _normalize(str(item.get("challenge_id") or "")),
+        _normalize(str(item.get("canonical_id") or "")),
+        _normalize(str(item.get("canonical_name") or "")),
+    ]
+    preferred.extend(_normalize(str(value)) for value in _list_values(item.get("source_ids")))
+    for key in preferred:
+        previous = previous_by_key.get(key)
+        if previous:
+            return previous
+    for key in _challenge_keys(item):
+        previous = previous_by_key.get(key)
+        if previous:
+            return previous
+    return {}
+
+
+def _merge_challenge_entry(previous: Mapping[str, Any], item: Mapping[str, Any]) -> dict[str, Any]:
+    merged = _normalize_challenge_entry({**dict(previous or {}), **dict(item)})
+    for key in ("aliases", "artifact_sources", "source_ids"):
+        merged[key] = _dedupe_strings([*_list_values(previous.get(key)), *_list_values(item.get(key))])
+    if isinstance(previous.get("submit_metadata"), Mapping) and "submit_metadata" not in item:
+        merged["submit_metadata"] = dict(previous["submit_metadata"])
+    previous_status = str(previous.get("status") or "")
+    item_status = str(item.get("status") or "")
+    if item.get("platform_solved") or item_status == "external_solved":
+        merged["status"] = "external_solved"
+        merged["solved_by_external"] = True
+    elif previous_status in {"solved", "external_solved", "stalled", "claimed"}:
+        merged["status"] = previous_status
+        if previous_status == "external_solved":
+            merged["solved_by_external"] = True
+    for key in ("claimed_by", "claimed_at", "solved_at", "flag_hash", "artifact_sha256", "stalled_reason"):
+        if key in previous and key not in item:
+            merged[key] = previous[key]
+    merged["claimable"] = _claimable_source(merged)
+    return merged
+
+
+def _normalize_challenge_entry(item: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    challenge_id = str(normalized.get("challenge_id") or normalized.get("canonical_id") or normalized.get("name") or "").strip()
+    name = str(normalized.get("name") or normalized.get("canonical_name") or challenge_id).strip()
+    normalized["challenge_id"] = challenge_id
+    normalized["name"] = name
+    normalized["canonical_id"] = str(normalized.get("canonical_id") or challenge_id)
+    normalized["canonical_name"] = str(normalized.get("canonical_name") or name)
+    normalized["aliases"] = _dedupe_strings(_list_values(normalized.get("aliases")))
+    normalized["artifact_sources"] = _dedupe_strings(_list_values(normalized.get("artifact_sources")))
+    normalized["source_ids"] = _dedupe_strings(_list_values(normalized.get("source_ids")) or [challenge_id])
+    normalized["is_alias"] = bool(normalized.get("is_alias", False))
+    normalized["is_static_shell"] = bool(normalized.get("is_static_shell", False))
+    normalized["is_static_alias"] = bool(normalized.get("is_static_alias", False))
+    normalized["solved_by_external"] = bool(normalized.get("solved_by_external", False))
+    normalized.setdefault("priority", 100)
+    normalized.setdefault("status", "skipped" if normalized.get("is_static_shell") else "todo")
+    normalized["claimable"] = _claimable_source(normalized)
+    return normalized
 
 
 def _challenge_text_for_ingest(challenge: Mapping[str, Any]) -> str:
@@ -1611,21 +2012,32 @@ def _challenge_text_for_ingest(challenge: Mapping[str, Any]) -> str:
 
 
 def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
-    solved_ids = {str(row.get("challenge_id")) for row in _read_jsonl(root / "solved.jsonl") if row.get("challenge_id")}
-    external = {line.strip() for line in (root / "external_solved.txt").read_text(encoding="utf-8").splitlines() if line.strip()} if (root / "external_solved.txt").exists() else set()
-    stalled = {str(row.get("challenge_id")) for row in _read_jsonl(root / "stalled.jsonl") if row.get("challenge_id")}
-    claimed = _claimed_ids(root)
+    solved_ids = {_normalize(str(row.get("challenge_id"))) for row in _read_jsonl(root / "solved.jsonl") if row.get("challenge_id")}
+    external = (
+        {_normalize(line.strip()) for line in (root / "external_solved.txt").read_text(encoding="utf-8").splitlines() if line.strip()}
+        if (root / "external_solved.txt").exists()
+        else set()
+    )
+    stalled = {_normalize(str(row.get("challenge_id"))) for row in _read_jsonl(root / "stalled.jsonl") if row.get("challenge_id")}
+    claimed = {_normalize(value) for value in _claimed_ids(root)}
     for item in board.get("challenges", []):
         cid = str(item.get("challenge_id") or "")
-        if cid in solved_ids:
+        keys = _challenge_keys(item)
+        item["claimable"] = _claimable_source(item)
+        if keys & solved_ids:
             item["status"] = "solved"
-        elif cid in external or str(item.get("name") or "") in external:
+            item["solved_by_external"] = False
+        elif keys & external:
             item["status"] = "external_solved"
-        elif cid in stalled:
+            item["solved_by_external"] = True
+        elif item.get("platform_solved"):
+            item["status"] = "external_solved"
+            item["solved_by_external"] = True
+        elif keys & stalled:
             item["status"] = "stalled"
-        elif cid in claimed:
+        elif keys & claimed:
             item["status"] = "claimed"
-        elif item.get("is_alias") or item.get("is_static_alias"):
+        elif not _claimable_source(item):
             item["status"] = "skipped"
         elif item.get("status") in {"solved", "external_solved", "stalled", "claimed", "skipped"}:
             continue
@@ -1633,8 +2045,14 @@ def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
             item["status"] = "todo"
 
 
+def _claimable_source(item: Mapping[str, Any]) -> bool:
+    if item.get("is_alias") or item.get("is_static_alias") or item.get("is_static_shell"):
+        return False
+    return bool(item.get("claimable", True))
+
+
 def _claimable(root: Path, item: Mapping[str, Any]) -> bool:
-    return _challenge_status(root, item) == "todo" and not item.get("is_alias") and not item.get("is_static_alias")
+    return _challenge_status(root, item) == "todo" and _claimable_source(item)
 
 
 def _challenge_status(root: Path, item: Mapping[str, Any]) -> str:
@@ -1675,6 +2093,7 @@ def _claimed_ids(root: Path) -> set[str]:
 
 def _release_locks(root: Path, *, agent: str | None, challenge: str | None) -> int:
     count = 0
+    wanted = _normalize(challenge or "")
     for path in (root / "claims").glob("*.lock"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -1682,11 +2101,27 @@ def _release_locks(root: Path, *, agent: str | None, challenge: str | None) -> i
             data = {}
         if agent and str(data.get("agent")) != agent:
             continue
-        if challenge and _normalize(challenge) not in {_normalize(str(data.get("challenge_id") or "")), _normalize(str(data.get("name") or ""))}:
+        keys = {
+            _normalize(str(data.get("challenge_id") or "")),
+            _normalize(str(data.get("name") or "")),
+            _normalize(str(data.get("canonical_id") or "")),
+            _normalize(str(data.get("canonical_name") or "")),
+        }
+        keys.update(_normalize(str(value)) for value in _list_values(data.get("aliases")))
+        keys.update(_normalize(str(value)) for value in _list_values(data.get("source_ids")))
+        keys.update(_normalize(str(value)) for value in _list_values(data.get("artifact_sources")))
+        if wanted and wanted not in keys:
             continue
         _unlink(path)
         count += 1
     return count
+
+
+def _release_locks_for_item(root: Path, *, agent: str | None, item: Mapping[str, Any]) -> int:
+    released = 0
+    for key in _challenge_release_values(item):
+        released += _release_locks(root, agent=agent, challenge=key)
+    return released
 
 
 def _find_challenge(board: Mapping[str, Any], challenge: str) -> dict[str, Any] | None:
@@ -1698,9 +2133,49 @@ def _find_challenge(board: Mapping[str, Any], challenge: str) -> dict[str, Any] 
 
 
 def _challenge_keys(item: Mapping[str, Any]) -> set[str]:
-    keys = {_normalize(str(item.get("challenge_id") or "")), _normalize(str(item.get("name") or "")), _normalize(str(item.get("canonical_id") or ""))}
-    keys.update(_normalize(str(alias)) for alias in item.get("aliases") or [])
+    keys = {
+        _normalize(str(item.get("challenge_id") or "")),
+        _normalize(str(item.get("name") or "")),
+        _normalize(str(item.get("canonical_id") or "")),
+        _normalize(str(item.get("canonical_name") or "")),
+    }
+    keys.update(_normalize(str(alias)) for alias in _list_values(item.get("aliases")))
+    keys.update(_normalize(str(alias)) for alias in _list_values(item.get("artifact_sources")))
+    keys.update(_normalize(str(alias)) for alias in _list_values(item.get("source_ids")))
     return {key for key in keys if key}
+
+
+def _challenge_release_values(item: Mapping[str, Any]) -> list[str]:
+    values = [
+        str(item.get("challenge_id") or ""),
+        str(item.get("name") or ""),
+        str(item.get("canonical_id") or ""),
+        str(item.get("canonical_name") or ""),
+    ]
+    values.extend(str(value) for value in _list_values(item.get("aliases")))
+    values.extend(str(value) for value in _list_values(item.get("artifact_sources")))
+    values.extend(str(value) for value in _list_values(item.get("source_ids")))
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _external_solved_lines(item: Mapping[str, Any], challenge: str) -> list[str]:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for value in [challenge, *_challenge_release_values(item)]:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        lines.append(text)
+    return lines
 
 
 def _challenge_path(contest_id: str, item: Mapping[str, Any]) -> Path:
@@ -1837,7 +2312,10 @@ def _e2e_public(value: Any) -> Any:
             "agent",
             "challenge_count",
             "target_count",
+            "canonical_count",
             "alias_count",
+            "skipped_static_count",
+            "claimable_count",
             "included_code_count",
             "summary_path",
             "operator_root",
@@ -2390,6 +2868,11 @@ def _claim_payload(contest_id: str, agent: str, item: Mapping[str, Any], *, dupl
         "agent": agent,
         "challenge_id": item.get("challenge_id"),
         "name": item.get("name"),
+        "canonical_id": item.get("canonical_id") or item.get("challenge_id"),
+        "canonical_name": item.get("canonical_name") or item.get("name"),
+        "aliases": _list_values(item.get("aliases")),
+        "source_ids": _list_values(item.get("source_ids")),
+        "artifact_sources": _list_values(item.get("artifact_sources")),
         "category": item.get("category"),
         "claimed_at": utc_now(),
         "allow_duplicate": duplicate,
@@ -2403,11 +2886,42 @@ def _challenge_public(item: Mapping[str, Any]) -> dict[str, Any]:
         "category": item.get("category", ""),
         "path": item.get("path", ""),
         "status": item.get("status", "todo"),
+        "canonical_id": item.get("canonical_id") or item.get("challenge_id"),
+        "canonical_name": item.get("canonical_name") or item.get("name"),
+        "aliases": _list_values(item.get("aliases")),
+        "artifact_sources": _list_values(item.get("artifact_sources")),
+        "source_ids": _list_values(item.get("source_ids")),
+        "is_static_shell": bool(item.get("is_static_shell")),
+        "claimable": bool(item.get("claimable", True)),
+        "solved_by_external": bool(item.get("solved_by_external")),
     }
 
 
 def _public_action(action: Any) -> dict[str, Any]:
     return _redact_object(action_to_dict(action))
+
+
+def _interactive_discover_public(payload: Mapping[str, Any]) -> dict[str, Any]:
+    details = payload.get("details") if isinstance(payload.get("details"), Mapping) else {}
+    safe_details: dict[str, Any] = {}
+    for key in ("endpoint", "platform", "challenge_count", "source_challenge_count", "browser_status", "status", "reason"):
+        if key in details:
+            safe_details[key] = details[key]
+    challenges = details.get("challenges")
+    if isinstance(challenges, list):
+        safe_details["challenge_count"] = len(challenges)
+    warnings = details.get("warnings")
+    if isinstance(warnings, list):
+        safe_details["warnings"] = [redact_text(str(item))[:300] for item in warnings[:20]]
+    return _redact_object(
+        {
+            "action": payload.get("action"),
+            "live": bool(payload.get("live")),
+            "network": bool(payload.get("network")),
+            "status": payload.get("status"),
+            "details": safe_details,
+        }
+    )
 
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
@@ -2454,6 +2968,47 @@ def _sha256_file(path: Path) -> str:
 
 def _redact_object(value: Any) -> Any:
     return json.loads(redact_text(json.dumps(value, sort_keys=True, default=str)))
+
+
+def _int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        text = str(value).strip()
+        return int(text) if text else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe_strings(values: Iterable[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = _normalize(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _list_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [value]
 
 
 def _normalize(value: str) -> str:

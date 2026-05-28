@@ -59,12 +59,22 @@ Board:
 ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
+Sync and board canonicalization:
+
+- `interactive sync` folds duplicate platform rows into canonical challenges before claim.
+- Static shell pages are detected when they have only generic short text and favicon/CSS-style links, or when the row is a `-static` slug.
+- Alias rows include case, spacing, slug, and phase metadata variants. They are recorded on the canonical challenge as `aliases`, `artifact_sources`, and `source_ids` instead of becoming default claim targets.
+- `board.json` challenge rows include `canonical_id`, `canonical_name`, `aliases`, `artifact_sources`, `source_ids`, `is_static_shell`, `claimable`, and `solved_by_external`.
+- `interactive sync --json` and `interactive board --json` report `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+
 Claim:
 
 ```bash
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge <id> --json
 ```
+
+Default claim returns only canonical rows where `claimable` is true. If a solver requests an alias or static slug with `--challenge`, the claim resolves to the canonical challenge and returns the canonical path/name.
 
 Release:
 
@@ -122,6 +132,8 @@ ctfctl interactive stalled --contest-id "$CONTEST_ID" --agent agent-1 --challeng
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
 ```
 
+`external-solved` accepts a canonical ID/name, alias, static slug, or artifact source. It marks the canonical challenge as `external_solved`, sets `solved_by_external`, appends local `external_solved.txt` entries, and releases claim locks for the canonical ID and aliases. Use this when a teammate solves a problem but platform sync does not expose team-solved state.
+
 Writeup and cleanup:
 
 ```bash
@@ -176,7 +188,7 @@ By default, `interactive claim` creates a lock under
 computer from claiming the same challenge. This avoids local duplicate work.
 
 Use `--allow-duplicate` only when the operator intentionally wants several local
-Codex sessions to race or compare approaches on one challenge:
+Codex sessions to race or compare approaches on one canonical challenge:
 
 ```bash
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-2 --challenge <id> --allow-duplicate --json

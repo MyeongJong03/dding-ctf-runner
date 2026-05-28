@@ -54,6 +54,8 @@ Monitor board:
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
+Board sync is canonical-first. Alias/static shell rows stay in `board.json` under the canonical challenge as `aliases`, `artifact_sources`, and `source_ids`; default claims skip them. Check `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count` after sync if the platform publishes duplicate rows.
+
 Add operator information:
 
 ```bash
@@ -72,6 +74,8 @@ Record an outside solve:
 ```bash
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
 ```
+
+The `<id>` may be a canonical challenge, alias, static slug, or artifact source. This is the fallback when another teammate solved the challenge but team-solved state did not appear in platform sync.
 
 ## 4. Submit And Writeup
 
