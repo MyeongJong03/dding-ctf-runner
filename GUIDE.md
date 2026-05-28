@@ -367,6 +367,18 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 ./scripts/ctfctl docker pool-stop --contest-id mac-docker-smoke --json
 ```
 
+Interactive E2E before the next contest:
+
+```bash
+./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
+```
+
+This is the current full-loop rehearsal for the interactive swarm. It is
+fake/local only and checks accepted-only writeups, full solver code capture,
+cleanup, stalled metrics without writeups, metrics summary, next claim, and
+same-machine duplicate-claim behavior. Use `--keep-runtime` when inspecting
+`~/CTF/contests/fake-interactive-smoke/operator`.
+
 ## 11. Legacy Background Workers
 
 The old background flow remains for advanced testing:

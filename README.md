@@ -46,6 +46,7 @@ export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 export AGENTS=4
 
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
@@ -104,6 +105,8 @@ Keep runtime state outside this repo:
 Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, auth material, downloaded private challenge files, or callback hits to public services, public repositories, public pastes, issue trackers, or external writeup locations.
 
 Interactive metrics are stored under the operator root in `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`. These files are local raw metrics and stay outside this repo.
+
+Before the next contest, run `ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json`. It uses only local fake CTFd fixtures and verifies init, sync, claim, accepted submit, solved/submission records, ko/en writeups with full solver code, cleanup, stalled metrics without writeups, metrics summary, and duplicate-claim behavior.
 
 GitHub-managed metrics must be public-safe snapshots only:
 

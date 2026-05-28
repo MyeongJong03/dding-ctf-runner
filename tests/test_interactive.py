@@ -181,6 +181,58 @@ def test_public_check_ignores_untracked_operator_runtime_files(tmp_path: Path):
     assert result["untracked_runtime_paths"] == []
 
 
+def test_interactive_e2e_smoke_full_fake_loop(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    writeup_root = tmp_path / "writeups"
+
+    result = _run_json(
+        [
+            "interactive",
+            "e2e-smoke",
+            "--contest-id",
+            "fake-interactive-demo",
+            "--agents",
+            "2",
+            "--writeup-root",
+            str(writeup_root),
+            "--keep-runtime",
+            "--json",
+        ]
+    )
+
+    assert result["status"] == "ok"
+    assert all(result["checks"].values())
+    root = tmp_path / "contests" / "fake-interactive-demo" / "operator"
+    solved = (root / "solved.jsonl").read_text(encoding="utf-8")
+    submissions = (root / "submissions.jsonl").read_text(encoding="utf-8")
+    summary = result["metrics_summary"]
+
+    assert "easy-misc-1" in solved
+    assert "easy-misc-1" in submissions
+    assert summary["claimed_count"] >= 4
+    assert summary["submitted_count"] == 1
+    assert summary["accepted_count"] == 1
+    assert summary["writeup_ko_count"] == 1
+    assert summary["writeup_en_count"] == 1
+    assert summary["cleanup_count"] == 1
+    assert summary["stalled_count"] == 1
+    assert result["claims"]["duplicate_blocked"]["status"] == "blocked"
+    assert result["claims"]["duplicate_allowed"]["status"] == "claimed"
+    assert result["claims"]["next_after_solved"]["challenge_id"] != "easy-misc-1"
+
+    ko = writeup_root / "[misc]easy-misc-1Writeup.ko.md"
+    en = writeup_root / "[misc]easy-misc-1Writeup.en.md"
+    assert ko.exists()
+    assert en.exists()
+    for path in (ko, en):
+        text = path.read_text(encoding="utf-8")
+        assert "## solver/exploit 전체 코드" in text or "## Full Solver / Exploit Code" in text
+        assert "def main() -> int:" in text
+        assert "raise SystemExit(main())" in text
+        assert "flag =" not in text
+    assert not list(writeup_root.glob("*stalled*Writeup.*.md"))
+
+
 class FakeAcceptedPlatform:
     policy = {"allow_submission": True}
 

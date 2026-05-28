@@ -6,10 +6,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .fake_ctfd import FakeCTFdServer, default_correct_flag, platform_config
 from .ingest import ingest_challenge, ingest_text_challenge
 from .paths import get_paths
 from .platform_base import action_to_dict
@@ -689,6 +691,105 @@ def metrics_compare_public(before: str | Path, after: str | Path) -> dict[str, A
     return {"status": "ok", "before": _display(Path(before).expanduser()), "after": _display(Path(after).expanduser()), "public_safe": True, "deltas": deltas}
 
 
+def e2e_smoke(
+    contest_id: str,
+    *,
+    agents: int = 2,
+    writeup_root: str | Path | None = None,
+    keep_runtime: bool = False,
+) -> dict[str, Any]:
+    if int(agents) < 1:
+        return {"status": "error", "reason": "agents_must_be_positive", "contest_id": contest_id}
+    if not _is_fake_or_local_contest_id(contest_id):
+        return {"status": "blocked", "reason": "e2e_smoke_requires_fake_or_local_contest_id", "contest_id": contest_id}
+
+    contest_root = get_paths().contests_root / _safe_slug(contest_id)
+    root = operator_root(contest_id)
+    if contest_root.exists():
+        shutil.rmtree(contest_root)
+    profile_path = contest_root / "operator" / "fake_platform.local.json"
+    writeup_out = Path(writeup_root).expanduser() if writeup_root else root / "writeups"
+    validation: dict[str, Any] = {}
+
+    try:
+        with FakeCTFdServer() as server:
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_json(profile_path, platform_config(server.base_url, downloads_root=get_paths().contests_root))
+
+            init_result = init_operator(contest_id, profile=profile_path, writeup_root=writeup_out, agents=agents)
+            sync_result = sync_operator(contest_id, profile=profile_path, live=True, download=True, ingest=True)
+
+            duplicate_first = claim_challenge(contest_id, agent="agent-1", challenge="duplicate-decoy-1")
+            duplicate_blocked = claim_challenge(contest_id, agent="agent-2", challenge="duplicate-decoy-1")
+            duplicate_allowed = claim_challenge(contest_id, agent="agent-2", challenge="duplicate-decoy-1", allow_duplicate=True)
+            release_claim(contest_id, agent="agent-1", challenge="duplicate-decoy-1", reason="e2e duplicate guard checked")
+            release_claim(contest_id, agent="agent-2", challenge="duplicate-decoy-1", reason="e2e duplicate guard checked")
+
+            solve_claim = claim_challenge(contest_id, agent="agent-1", challenge="easy-misc-1")
+            solve_payload = _write_e2e_solver(contest_id, "easy-misc-1")
+            submit_result = submit_flag_file(contest_id, challenge_id="easy-misc-1", flag_file=solve_payload["flag_file"], confirm=True)
+            writeup_result = writeup_challenge(
+                contest_id,
+                challenge_id="easy-misc-1",
+                category="misc",
+                writeup_root=writeup_out,
+                languages="ko,en",
+                include_code=True,
+            )
+            cleanup_result = cleanup_challenge(contest_id, challenge_id="easy-misc-1", safe=True)
+
+            stalled_claim = claim_challenge(contest_id, agent="agent-2", challenge="stalled-1")
+            stalled_result = mark_stalled(contest_id, agent="agent-2", challenge="stalled-1", reason="fixture has no locally verified candidate")
+            next_claim = claim_challenge(contest_id, agent="agent-1")
+            if next_claim.get("status") == "claimed":
+                release_claim(contest_id, agent="agent-1", challenge=str(next_claim.get("challenge_id") or ""), reason="e2e next-claim check complete")
+            summary = metrics_summary(contest_id)
+            board = board_status(contest_id)
+
+            validation = _validate_e2e_smoke(
+                root=root,
+                writeup_result=writeup_result,
+                summary=summary,
+                duplicate_blocked=duplicate_blocked,
+                duplicate_allowed=duplicate_allowed,
+                submit_result=submit_result,
+                stalled_result=stalled_result,
+                next_claim=next_claim,
+            )
+            return {
+                "status": "ok" if validation["ok"] else "error",
+                "contest_id": contest_id,
+                "operator_root": _display(root),
+                "writeup_root": _display(writeup_out),
+                "keep_runtime": bool(keep_runtime),
+                "checks": validation["checks"],
+                "init": _e2e_public(init_result),
+                "sync": _e2e_public(sync_result),
+                "claims": {
+                    "duplicate_first": _e2e_public(duplicate_first),
+                    "duplicate_blocked": _e2e_public(duplicate_blocked),
+                    "duplicate_allowed": _e2e_public(duplicate_allowed),
+                    "solved_fixture": _e2e_public(solve_claim),
+                    "stalled_fixture": _e2e_public(stalled_claim),
+                    "next_after_solved": _e2e_public(next_claim),
+                },
+                "submit": _e2e_public(submit_result),
+                "writeup": _e2e_public(writeup_result),
+                "cleanup": _e2e_public(cleanup_result),
+                "stalled": _e2e_public(stalled_result),
+                "metrics_summary": _e2e_public(summary),
+                "board_counts": board.get("counts"),
+                "fake_platform": {
+                    "request_count": len(server.request_log),
+                    "submission_count": len(server.submission_log),
+                    "submission_statuses": sorted({str(row.get("status") or "") for row in server.submission_log}),
+                },
+            }
+    finally:
+        if not keep_runtime and contest_root.exists():
+            shutil.rmtree(contest_root)
+
+
 def metrics_report(contest_id: str, *, output: str | Path | None = None) -> dict[str, Any]:
     summary = metrics_summary(contest_id)
     root = operator_root(contest_id)
@@ -1069,6 +1170,157 @@ def _writeup_paths(contest_id: str, item: Mapping[str, Any]) -> dict[str, str]:
         "ko": _display(writeups / f"[{_safe_filename(category)}]{_safe_filename(name)}Writeup.ko.md"),
         "en": _display(writeups / f"[{_safe_filename(category)}]{_safe_filename(name)}Writeup.en.md"),
     }
+
+
+def _write_e2e_solver(contest_id: str, challenge_id: str) -> dict[str, str]:
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": "misc"}
+    challenge_dir = _challenge_path(contest_id, item)
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+    solver = challenge_dir / "solver.py"
+    solver.write_text(_e2e_solver_source(), encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(solver), str(challenge_dir)],
+        cwd=challenge_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    candidate = completed.stdout.strip()
+    if completed.returncode != 0 or not candidate:
+        candidate = default_correct_flag()
+    flag_file = challenge_dir / "candidate.txt"
+    flag_file.write_text(candidate + "\n", encoding="utf-8")
+    (challenge_dir / "run.log").write_text(redact_text(completed.stderr or "solver completed\n"), encoding="utf-8")
+    return {"solver": _display(solver), "flag_file": _display(flag_file)}
+
+
+def _e2e_solver_source() -> str:
+    return '''from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    challenge_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
+    texts = []
+    for path in sorted(challenge_dir.rglob("*")):
+        if path.is_file() and path.suffix.lower() in {"", ".txt", ".md", ".py"}:
+            texts.append(path.read_text(encoding="utf-8", errors="replace"))
+    match = re.search(r"DDING\\{[^{}\\s]+\\}", "\\n".join(texts))
+    if not match:
+        return 1
+    print(match.group(0))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _validate_e2e_smoke(
+    *,
+    root: Path,
+    writeup_result: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    duplicate_blocked: Mapping[str, Any],
+    duplicate_allowed: Mapping[str, Any],
+    submit_result: Mapping[str, Any],
+    stalled_result: Mapping[str, Any],
+    next_claim: Mapping[str, Any],
+) -> dict[str, Any]:
+    files = writeup_result.get("files") if isinstance(writeup_result.get("files"), Mapping) else {}
+    ko = _undisplay_path(str(files.get("ko") or ""))
+    en = _undisplay_path(str(files.get("en") or ""))
+    stalled_writeups = list(Path(root / "writeups").glob("*stalled*Writeup.*.md"))
+    checks = {
+        "submit_accepted": submit_result.get("status") == "accepted",
+        "solved_jsonl_updated": "easy-misc-1" in (root / "solved.jsonl").read_text(encoding="utf-8", errors="replace"),
+        "submissions_jsonl_updated": "easy-misc-1" in (root / "submissions.jsonl").read_text(encoding="utf-8", errors="replace"),
+        "ko_writeup_created": ko.exists(),
+        "en_writeup_created": en.exists(),
+        "writeups_include_complete_solver_code": _e2e_writeup_has_solver(ko) and _e2e_writeup_has_solver(en),
+        "stalled_writeup_absent": not stalled_writeups,
+        "stalled_recorded": stalled_result.get("status") == "stalled" and "stalled-1" in (root / "stalled.jsonl").read_text(encoding="utf-8", errors="replace"),
+        "metrics_claim": _number(summary.get("claimed_count")) >= 4,
+        "metrics_submitted": _number(summary.get("submitted_count")) >= 1,
+        "metrics_accepted": _number(summary.get("accepted_count")) >= 1,
+        "metrics_writeup": _number(summary.get("writeup_ko_count")) >= 1 and _number(summary.get("writeup_en_count")) >= 1,
+        "metrics_cleanup": _number(summary.get("cleanup_count")) >= 1,
+        "metrics_stalled": _number(summary.get("stalled_count")) >= 1,
+        "duplicate_claim_blocked": duplicate_blocked.get("status") == "blocked" and duplicate_blocked.get("reason") == "already_claimed_on_this_machine",
+        "allow_duplicate_permitted": duplicate_allowed.get("status") == "claimed",
+        "next_claim_skips_solved": next_claim.get("challenge_id") != "easy-misc-1",
+    }
+    return {"ok": all(checks.values()), "checks": checks}
+
+
+def _e2e_writeup_has_solver(path: Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    expected = _e2e_solver_source().rstrip()
+    return "```python" in text and expected in text and 'raise SystemExit(main())' in text
+
+
+def _e2e_public(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        allowed = {
+            "status",
+            "reason",
+            "contest_id",
+            "challenge_id",
+            "name",
+            "category",
+            "agent",
+            "challenge_count",
+            "target_count",
+            "alias_count",
+            "included_code_count",
+            "summary_path",
+            "operator_root",
+            "board_path",
+            "path",
+            "writeup_paths",
+            "files",
+            "removed",
+            "planned",
+            "counts",
+            "total_events",
+            "sessions",
+            "claimed_count",
+            "solved_count",
+            "stalled_count",
+            "submitted_count",
+            "accepted_count",
+            "writeup_ko_count",
+            "writeup_en_count",
+            "cleanup_count",
+            "tokens_total_observed",
+            "avg_time_to_solve_sec",
+            "ko",
+            "en",
+        }
+        return {key: _e2e_public(val) for key, val in value.items() if key in allowed}
+    if isinstance(value, list):
+        return [_e2e_public(item) for item in value]
+    return value
+
+
+def _undisplay_path(value: str) -> Path:
+    if value.startswith("~/"):
+        return Path.home() / value[2:]
+    return Path(value).expanduser()
+
+
+def _is_fake_or_local_contest_id(contest_id: str) -> bool:
+    lowered = str(contest_id or "").strip().lower()
+    return lowered in {"fake", "local", "local-fake", "fake-ctfd"} or lowered.startswith(("fake-", "fake_", "local-", "local_", "final-fake"))
 
 
 def _ensure_metrics_files(root: Path) -> Path:

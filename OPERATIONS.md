@@ -12,12 +12,19 @@ export AGENTS=4
 
 ./scripts/ctfctl preflight --deep --json
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
 Use `--agents 6` on a strong Windows WSL machine. Use `--agents 4` on MacBook.
+
+The interactive smoke is local-only. It loads fake challenges, exercises claim,
+accepted submit, solved/submission records, ko/en accepted-only writeups with
+full solver code, cleanup, stalled metrics without writeups, metrics summary,
+next claim, and duplicate-claim guards. Use `--keep-runtime` only when you need
+to inspect the generated local operator files.
 
 ## 2. Start Codex
 

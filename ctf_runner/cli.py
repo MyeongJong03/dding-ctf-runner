@@ -60,6 +60,7 @@ from .interactive import (
     board_status as interactive_board_status,
     claim_challenge as interactive_claim_challenge,
     cleanup_challenge as interactive_cleanup_challenge,
+    e2e_smoke as interactive_e2e_smoke,
     init_operator as interactive_init_operator,
     mark_external_solved as interactive_mark_external_solved,
     mark_stalled as interactive_mark_stalled,
@@ -410,6 +411,20 @@ def _cmd_interactive_prompt(args: argparse.Namespace) -> int:
     else:
         print(redact_text(str(data.get("prompt") or "")))
     return 0
+
+
+def _cmd_interactive_e2e_smoke(args: argparse.Namespace) -> int:
+    data = interactive_e2e_smoke(
+        args.contest_id,
+        agents=args.agents,
+        writeup_root=args.writeup_root,
+        keep_runtime=args.keep_runtime,
+    )
+    if args.json:
+        _print_json(data)
+    else:
+        _print_json({"status": data.get("status"), "contest_id": data.get("contest_id"), "checks": data.get("checks")})
+    return 0 if data.get("status") == "ok" else 1
 
 
 def _cmd_interactive_metrics_record(args: argparse.Namespace) -> int:
@@ -2112,6 +2127,13 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prompt.add_argument("--agent", required=True)
     interactive_prompt.add_argument("--json", action="store_true")
     interactive_prompt.set_defaults(func=_cmd_interactive_prompt)
+    interactive_e2e = interactive_sub.add_parser("e2e-smoke")
+    interactive_e2e.add_argument("--contest-id", required=True)
+    interactive_e2e.add_argument("--agents", type=int, default=2)
+    interactive_e2e.add_argument("--writeup-root")
+    interactive_e2e.add_argument("--json", action="store_true")
+    interactive_e2e.add_argument("--keep-runtime", action="store_true")
+    interactive_e2e.set_defaults(func=_cmd_interactive_e2e_smoke)
     interactive_metrics = interactive_sub.add_parser("metrics")
     interactive_metrics_sub = interactive_metrics.add_subparsers(dest="interactive_metrics_command", required=True)
     interactive_metrics_record = interactive_metrics_sub.add_parser("record")

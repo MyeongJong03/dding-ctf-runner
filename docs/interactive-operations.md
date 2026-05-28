@@ -17,12 +17,23 @@ export AGENTS=4
 
 ./scripts/ctfctl preflight --deep --json
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
 Use `--agents 6` for a strong Windows WSL host and `--agents 4` for a MacBook.
+
+`interactive e2e-smoke` is the pre-contest full-loop check for this workflow.
+It starts a local fake CTFd fixture, initializes the operator root at
+`~/CTF/contests/<contest>/operator`, syncs fake challenges, verifies claim and
+duplicate-claim behavior, submits a synthetic accepted solve through the normal
+interactive submit path, creates accepted-only ko/en writeups with complete
+solver code, runs cleanup, records a stalled fixture without writeups, updates
+metrics, and confirms the next claim does not pick the solved challenge. It
+never contacts an external CTF. Add `--keep-runtime` only when you need to
+inspect generated local files.
 
 Generate one prompt per solver:
 
@@ -90,6 +101,13 @@ Writeup and cleanup:
 ```bash
 ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
 ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
+```
+
+E2E smoke:
+
+```bash
+ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
+ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --writeup-root /tmp/interactive-writeups --keep-runtime --json
 ```
 
 ## Board And Operator Files
