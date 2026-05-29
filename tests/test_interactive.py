@@ -46,6 +46,9 @@ def test_interactive_prompt_allows_local_flag_output_and_bans_public_upload(tmp_
     assert "starter_path" in prompt
     assert "target_pack_path" in prompt
     assert "ctfctl interactive target-pack" in prompt
+    assert "prepare-target --contest-id demo --agent a1 --json" in prompt
+    assert "completion_status is all_solved or all_solved_or_stalled" in prompt
+    assert "Never stop after one problem" in prompt
 
 
 def test_interactive_init_lock_idempotent(tmp_path: Path, monkeypatch):
@@ -545,7 +548,7 @@ def test_interactive_starter_generation_smoke_web_pwn_crypto(tmp_path: Path, mon
         assert not list((tmp_path / "contests" / contest_id / "operator" / "writeups").glob("*Writeup.*.md"))
 
 
-def test_interactive_next_can_retry_stalled_with_clear_next_steps_when_no_fresh_todo(tmp_path: Path, monkeypatch):
+def test_interactive_next_reports_all_solved_or_stalled_when_only_stalled_remains(tmp_path: Path, monkeypatch):
     _seed_board(tmp_path, monkeypatch)
     _run_json(["interactive", "claim", "--contest-id", "demo", "--agent", "a1", "--json"])
     _run_json(
@@ -581,10 +584,9 @@ def test_interactive_next_can_retry_stalled_with_clear_next_steps_when_no_fresh_
 
     result = _run_json(["interactive", "next", "--contest-id", "demo", "--agent", "a2", "--json"])
 
-    assert result["status"] == "claimed"
-    assert result["challenge_id"] == "birdhouse"
-    assert result["selected_status"] == "stalled"
-    assert "clear_next_steps" in result["score_reasons"]
+    assert result["status"] == "empty"
+    assert result["completion_status"] == "all_solved_or_stalled"
+    assert result["no_useful_work"] is True
 
 
 def test_external_solved_alias_marks_canonical_and_releases_alias_locks(tmp_path: Path, monkeypatch):
@@ -629,6 +631,124 @@ def test_sync_platform_solved_status_excludes_team_solved_without_raw_submission
     assert board["challenges"][0]["platform_submission"]["status"] == "correct"
     assert raw_marker not in output
     assert raw_marker not in board_text
+
+
+def test_interactive_status_reports_active_with_todo_challenges(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+
+    status = _run_json(["interactive", "status", "--contest-id", "demo", "--json"])
+
+    assert status["status"] == "ok"
+    assert status["completion_status"] == "active"
+    assert status["canonical_count"] == 1
+    assert status["claimable_count"] == 1
+    assert status["todo"] == 1
+    assert status["no_useful_work"] is False
+
+
+def test_interactive_status_reports_all_solved_when_all_canonical_solved(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    operator = tmp_path / "contests" / "demo" / "operator"
+    _append_jsonl(operator / "solved.jsonl", {"challenge_id": "birdhouse", "status": "accepted", "flag_hash": "abc", "timestamp": "now"})
+
+    status = _run_json(["interactive", "status", "--contest-id", "demo", "--json"])
+
+    assert status["completion_status"] == "all_solved"
+    assert status["solved"] == 1
+    assert status["external_solved"] == 0
+    assert status["no_useful_work"] is True
+
+
+def test_interactive_status_reports_all_solved_or_stalled(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    _run_json(["interactive", "stalled", "--contest-id", "demo", "--agent", "a1", "--challenge", "Birdhouse", "--reason", "documented blocker and next action", "--json"])
+
+    status = _run_json(["interactive", "status", "--contest-id", "demo", "--json"])
+
+    assert status["completion_status"] == "all_solved_or_stalled"
+    assert status["stalled"] == 1
+    assert status["no_useful_work"] is True
+
+
+def test_interactive_next_refresh_syncs_new_challenge_and_records_metrics(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    platform = FakeRefreshSyncPlatform(
+        [
+            {
+                "challenge_id": "fresh-web",
+                "name": "Fresh Web",
+                "category": "web",
+                "statement": "New challenge with a real statement and useful signal.",
+                "file_count": 1,
+            }
+        ]
+    )
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: platform)
+    _run_json(["interactive", "init", "--contest-id", "refresh-demo", "--profile", str(profile), "--json"])
+
+    result = _run_json(["interactive", "next", "--contest-id", "refresh-demo", "--agent", "a1", "--refresh", "--profile", str(profile), "--json"])
+
+    root = tmp_path / "contests" / "refresh-demo" / "operator"
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+    status = _run_json(["interactive", "status", "--contest-id", "refresh-demo", "--json"])
+
+    assert platform.calls == 1
+    assert platform.live_values == [True]
+    assert result["status"] == "claimed"
+    assert result["challenge_id"] == "fresh-web"
+    assert result["refresh"]["new_count"] == 1
+    assert status["claimed"] == 1
+    assert "sync_completed" in events
+    assert "new_challenges_detected" in events
+
+
+def test_interactive_prepare_target_refresh_returns_no_useful_work_when_no_target_remains(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeSolvedSyncPlatform())
+
+    result = _run_json(["interactive", "prepare-target", "--contest-id", "solved-refresh", "--agent", "a1", "--refresh", "--profile", str(profile), "--json"])
+
+    assert result["status"] == "empty"
+    assert result["completion_status"] == "all_solved"
+    assert result["no_useful_work"] is True
+    assert result["selection"]["refresh"]["claimable_count"] == 0
+
+
+def test_interactive_next_skips_solved_and_external_solved_challenges(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    root = tmp_path / "contests" / "demo" / "operator"
+    board_path = root / "board.json"
+    board = json.loads(board_path.read_text(encoding="utf-8"))
+    board["challenges"].extend(
+        [
+            {
+                "challenge_id": "team-solved",
+                "name": "Team Solved",
+                "category": "misc",
+                "status": "todo",
+                "priority": 1,
+            },
+            {
+                "challenge_id": "fresh-target",
+                "name": "Fresh Target",
+                "category": "misc",
+                "status": "todo",
+                "priority": 100,
+            },
+        ]
+    )
+    board_path.write_text(json.dumps(board), encoding="utf-8")
+    _append_jsonl(root / "solved.jsonl", {"challenge_id": "birdhouse", "status": "accepted", "flag_hash": "abc", "timestamp": "now"})
+    _run_json(["interactive", "external-solved", "--contest-id", "demo", "--challenge", "team-solved", "--json"])
+
+    result = _run_json(["interactive", "next", "--contest-id", "demo", "--agent", "a1", "--json"])
+
+    assert result["status"] == "claimed"
+    assert result["challenge_id"] == "fresh-target"
 
 
 def test_stalled_records_note_and_releases_claim(tmp_path: Path, monkeypatch):
@@ -1086,6 +1206,24 @@ class FakeSolvedSyncPlatform:
                     }
                 ]
             },
+        )
+
+
+class FakeRefreshSyncPlatform:
+    def __init__(self, challenges: list[dict]):
+        self.challenges = challenges
+        self.calls = 0
+        self.live_values: list[bool] = []
+
+    def discover_challenges(self, live: bool = False) -> PlatformAction:
+        self.calls += 1
+        self.live_values.append(live)
+        return PlatformAction(
+            action="discover_challenges",
+            live=live,
+            network=live,
+            status="ok",
+            details={"challenges": list(self.challenges)},
         )
 
 

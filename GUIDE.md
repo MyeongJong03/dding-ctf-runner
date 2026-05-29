@@ -161,10 +161,12 @@ Each solver should:
 - submit only through `ctfctl interactive submit` or `upload-submit`
 - write accepted-only ko/en writeups
 - clean safe temporary files
-- move to the next challenge unless the user stops the loop
+- move to the next challenge unless the user stops the loop, the contest ends, or all challenges are solved/external_solved/stalled-documented
 - keep self memos current to prevent context drift
 
-`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive next` and `interactive claim` return canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive next` and `interactive claim` return canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`. `interactive sync --json` also reports `new_count` and `updated_count`.
+
+No background refresh loop runs during a contest. New problems are picked up only when a visible Codex/operator command performs a refresh: `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`.
 
 ## 6. Interactive Commands
 
@@ -172,15 +174,17 @@ Board:
 
 ```bash
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ```
 
 Pick and claim the next target:
 
 ```bash
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ```
 
-`next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps`. It skips alias/static/artifact-source rows, solved/external-solved challenges, and generic no-file shells. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
+`next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear `next_steps`. It skips alias/static/artifact-source rows, solved/external-solved/stalled-documented challenges, and generic no-file shells. Use `--refresh --profile "$PROFILE"` to run one live sync before ranking; newly discovered challenges become claimable immediately and sync deltas are recorded in metrics. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
 
 Prepare a target for immediate solving:
 
@@ -188,12 +192,15 @@ Prepare a target for immediate solving:
 ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --max-attempts 5 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
 ```
 
 `solve-loop` is the standard experiment harness. It runs `prepare-target` when needed, executes the starter in the challenge directory, records `attempts/<timestamp>.json`, updates `attempts.md` and `evidence.md`, detects local candidates, verifies format/duplicate/fake-like/previous-wrong guards, and submits only high-confidence candidates through the interactive submit path. If accepted, it writes ko/en writeups, runs safe cleanup, updates metrics, and the solver continues to the next challenge. If no accepted candidate appears after `--max-attempts`, it updates `next_steps.md`, records stalled metrics, creates no writeup, and continues to the next challenge.
 
-`prepare-target` runs the target planner, target pack, local auto-triage, and starter generation as one shell-first step. If `--challenge-id` is omitted, it runs `interactive next`; otherwise it prepares the specified canonical challenge or alias. The JSON returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. Read the target pack, triage summary, and starter file before manual analysis.
+`prepare-target` runs the target planner, target pack, local auto-triage, and starter generation as one shell-first step. If `--challenge-id` is omitted, it runs `interactive next`; otherwise it prepares the specified canonical challenge or alias. With `--refresh`, it performs the same one-shot sync path as `next --refresh` first. The JSON returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. Read the target pack, triage summary, and starter file before manual analysis.
+
+`interactive status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. `active` means keep solving. `needs_sync` means a profile is configured but the board has not been refreshed. `no_claimable` means no fresh canonical target is currently available, often because work is already claimed locally. `all_solved` and `all_solved_or_stalled` are stop conditions. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
 
 Generate or refresh the solver launch pack:
 

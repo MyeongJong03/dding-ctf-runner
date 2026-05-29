@@ -51,6 +51,7 @@ export AGENTS=4
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
 ```
 
@@ -66,18 +67,23 @@ Paste one generated prompt into each Codex terminal. Recommended width:
 - Windows WSL: up to 6 Codex terminals.
 - MacBook: up to 4 Codex terminals.
 
-`interactive sync` builds a canonical challenge map before solvers claim work. Static shell pages, slug aliases, spacing/case variants, and phase metadata are folded into the canonical challenge's `aliases`, `artifact_sources`, and `source_ids` in `board.json`, then excluded from default claims. The sync JSON reports `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+`interactive sync` builds a canonical challenge map before solvers claim work. Static shell pages, slug aliases, spacing/case variants, and phase metadata are folded into the canonical challenge's `aliases`, `artifact_sources`, and `source_ids` in `board.json`, then excluded from default claims. The sync JSON reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+
+There is no background refresh loop. During a live contest, refresh happens only when a Codex/operator explicitly runs `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`. `next --refresh` and `prepare-target --refresh` perform one live discovery using the configured profile, record sync deltas in metrics, then continue with normal ranking/preparation. New challenges discovered by that single refresh become claimable immediately.
 
 Inside the same computer, duplicate claims are blocked by default on the canonical challenge. Use `ctfctl interactive claim --allow-duplicate` only when you intentionally want multiple local Codex sessions on the same problem. Duplicate claims across different computers are not coordinated.
 
 ## Solver Loop
 
-Each Codex terminal should keep going until the contest ends, the operator stops it, or there is no useful next work:
+Each Codex terminal should keep going until the contest ends, the operator stops it, or every challenge is solved, externally solved, or stalled-documented:
 
 ```bash
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --json
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --json
+ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
@@ -97,9 +103,11 @@ ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 
 `interactive solve-loop` is the preferred automation harness after target setup. It ensures `prepare-target`, executes the starter as a structured attempt, records stdout/stderr/returncode/runtime under `attempts/`, extracts local flag-like candidates into `candidates.jsonl`, verifies confidence and duplicate/wrong guards, and submits only high-confidence candidates through the guarded interactive submit path. Accepted solves continue to ko/en writeup, safe cleanup, and metrics summary; exhausted attempts mark the challenge stalled without creating a writeup.
 
-`interactive prepare-target` is the preferred manual solver starter. With no `--challenge-id`, it runs `next`, generates the target pack, runs local-only category triage, creates a category starter file, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`.
+`interactive status` summarizes board completion: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. It also reports active local claims, stale claims, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, alias count, and artifact source count. Stop only when the contest ends, the user stops the solver, or `completion_status` is `all_solved` or `all_solved_or_stalled`.
 
-`interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps` raise priority; alias/static rows, generic no-file statements, solved, and externally solved challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
+`interactive prepare-target` is the preferred manual solver starter. With no `--challenge-id`, it runs `next`, generates the target pack, runs local-only category triage, creates a category starter file, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. With `--refresh`, it first performs the same one-shot sync path as `next --refresh`.
+
+`interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear `next_steps` raise priority; alias/static rows, generic no-file statements, solved, externally solved, and stalled-documented challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
 
 `interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 

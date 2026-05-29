@@ -21,6 +21,7 @@ export AGENTS=4
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
+./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ```
 
 Use `--agents 6` for a strong Windows WSL host and `--agents 4` for a MacBook.
@@ -57,6 +58,7 @@ Board:
 
 ```bash
 ctfctl interactive board --contest-id "$CONTEST_ID" --json
+ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ```
 
 Sync and board canonicalization:
@@ -65,7 +67,10 @@ Sync and board canonicalization:
 - Static shell pages are detected when they have only generic short text and favicon/CSS-style links, or when the row is a `-static` slug.
 - Alias rows include case, spacing, slug, and phase metadata variants. They are recorded on the canonical challenge as `aliases`, `artifact_sources`, and `source_ids` instead of becoming default claim targets.
 - `board.json` challenge rows include `canonical_id`, `canonical_name`, `aliases`, `artifact_sources`, `source_ids`, `is_static_shell`, `claimable`, and `solved_by_external`.
-- `interactive sync --json` and `interactive board --json` report `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+- `interactive sync --json` reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+- `interactive status --json` reports `completion_status`, `no_useful_work`, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, active local claims, stale claims, alias count, and artifact source count.
+- `completion_status` values are `active`, `needs_sync`, `no_claimable`, `all_solved`, and `all_solved_or_stalled`. Stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`.
+- There is no background refresh loop. New challenges are discovered only by visible commands: `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`.
 
 Target planning and claim:
 
@@ -73,8 +78,10 @@ Target planning and claim:
 ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --max-attempts 5 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --category web --dry-run --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
@@ -89,15 +96,14 @@ ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge 
 
 Default claim returns only canonical rows where `claimable` is true. If a solver requests an alias or static slug with `--challenge`, the claim resolves to the canonical challenge and returns the canonical path/name.
 
-`interactive solve-loop` is the preferred solver entrypoint. It scores or prepares a target, ensures target pack/triage/starter, runs the starter in the challenge directory, records a structured attempt, extracts local candidates, verifies candidate confidence and submit guards, submits only high-confidence candidates, and performs accepted-only writeup plus cleanup when accepted. If it reaches `--max-attempts` without an accepted candidate, it updates attempts/evidence/next steps, records stalled metrics, creates no writeup, and returns the next action so the Codex keeps moving to another problem.
+`interactive solve-loop` is the preferred solver entrypoint. It scores or prepares a target, ensures target pack/triage/starter, runs the starter in the challenge directory, records a structured attempt, extracts local candidates, verifies candidate confidence and submit guards, submits only high-confidence candidates, and performs accepted-only writeup plus cleanup when accepted. If it reaches `--max-attempts` without an accepted candidate, it updates attempts/evidence/next steps, records stalled metrics, creates no writeup, and returns the next action so the Codex keeps moving to another problem. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
 
-`interactive next` scores only canonical claimable rows by practical solve signal:
+`interactive next` scores only canonical claimable rows by practical solve signal. With `--refresh`, it first performs one live sync using the configured profile, records sync deltas, then ranks the refreshed board:
 
 - positive: local attachments or downloaded handout files, detected remote endpoints, confident category, previous memory/evidence/attempts/operator notes, and clear `next_steps`
-- retryable: stalled challenges with concrete `next_steps` when no fresh todo target remains
-- negative or excluded: static shell rows, alias/artifact-source rows, generic no-file statements, claimed rows unless `--allow-duplicate`, solved, and external-solved
+- negative or excluded: static shell rows, alias/artifact-source rows, generic no-file statements, claimed rows unless `--allow-duplicate`, solved, external-solved, and stalled-documented rows
 
-`prepare-target` is the preferred Codex entrypoint. If `--challenge-id` is omitted, it runs `next`; otherwise it prepares the specified challenge or alias. It generates the target pack, runs local-only category triage, creates the category starter skeleton, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`.
+`prepare-target` is the preferred Codex entrypoint. If `--challenge-id` is omitted, it runs `next`; otherwise it prepares the specified challenge or alias. With `--refresh`, the no-challenge path is identical to `next --refresh` before preparation. It generates the target pack, runs local-only category triage, creates the category starter skeleton, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. If no target remains, it returns `completion_status` and `no_useful_work` instead of starting a background loop.
 
 On success, `next` claims the selected challenge and returns `target_pack_path`. With `--dry-run`, it writes the pack and reports the target without creating a claim lock.
 

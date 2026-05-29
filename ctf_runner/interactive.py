@@ -93,6 +93,12 @@ def sync_operator(
     root = operator_root(contest_id)
     board = _read_board(root, contest_id)
     platform = load_platform_adapter(profile)
+    previous_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
+    previous_board = {**board, "challenges": previous_items}
+    _apply_runtime_statuses(root, previous_board)
+    previous_items = [dict(item) for item in previous_board.get("challenges", []) if isinstance(item, Mapping)]
+    previous_signatures = _sync_signatures(root, previous_items)
+    previous_statuses = _sync_statuses(root, previous_items)
 
     discover_action = platform.discover_challenges(live=live)
     discover_payload = action_to_dict(discover_action)
@@ -106,7 +112,6 @@ def sync_operator(
             warnings.extend(str(item) for item in text_result.get("warnings") or [])
 
     canonical = _canonicalize_challenges(source_challenges)
-    previous_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
     previous_by_key: dict[str, dict[str, Any]] = {}
     for previous in previous_items:
         for key in _challenge_keys(previous):
@@ -134,10 +139,27 @@ def sync_operator(
 
     board["profile_path"] = _display(Path(profile).expanduser())
     board["updated_at"] = utc_now()
+    board["last_sync_at"] = board["updated_at"]
     board["canonical_map"] = canonical["map"]
     board["canonical_counts"] = canonical["counts"]
     board["challenges"] = sorted(merged_challenges, key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or "")))
     _apply_runtime_statuses(root, board)
+    after_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
+    after_signatures = _sync_signatures(root, after_items)
+    after_statuses = _sync_statuses(root, after_items)
+    after_public_ids = _sync_public_ids(after_items)
+    new_keys = sorted(set(after_signatures) - set(previous_signatures))
+    updated_keys = sorted(key for key in set(after_signatures) & set(previous_signatures) if after_signatures[key] != previous_signatures[key])
+    status_changes = [
+        {
+            "challenge_id": after_public_ids.get(key, key),
+            "from": previous_statuses.get(key, "missing"),
+            "to": after_statuses.get(key, "missing"),
+        }
+        for key in sorted(set(previous_statuses) | set(after_statuses))
+        if previous_statuses.get(key, "missing") != after_statuses.get(key, "missing")
+    ]
+    stale_before_release = _stale_claims(root, board)
     for challenge in board["challenges"]:
         if challenge.get("solved_by_external"):
             _release_locks_for_item(root, agent=None, item=challenge)
@@ -181,15 +203,56 @@ def sync_operator(
                     else:
                         ingest_results.append({"challenge_id": challenge_id, "status": "skipped", "reason": "no_text_or_handout"})
 
+    claimable_count = sum(1 for item in board["challenges"] if _claimable(root, item))
+    sync_metrics = {
+        "status": "ok" if discover_action.status in {"ok", "planned"} else discover_action.status,
+        "challenge_count": len(source_challenges),
+        "canonical_count": canonical["counts"]["canonical_count"],
+        "new_count": len(new_keys),
+        "updated_count": len(updated_keys),
+        "alias_count": canonical["counts"]["alias_count"],
+        "claimable_count": claimable_count,
+        "status_change_count": len(status_changes),
+        "new_challenge_ids": [after_public_ids.get(key, key) for key in new_keys],
+        "updated_challenge_ids": [after_public_ids.get(key, key) for key in updated_keys],
+    }
+    _record_metrics_event(root, contest_id=contest_id, event="sync_completed", data=sync_metrics)
+    if new_keys:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="new_challenges_detected",
+            data={"new_count": len(new_keys), "challenge_ids": [after_public_ids.get(key, key) for key in new_keys]},
+        )
+    solved_changes = [row for row in status_changes if row["to"] in {"solved", "external_solved"} or row["from"] in {"solved", "external_solved"}]
+    if solved_changes:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="challenge_status_changed",
+            data={"change_count": len(solved_changes), "changes": solved_changes[:50]},
+        )
+    if stale_before_release:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="stale_claims_detected",
+            data={"source": "sync", "stale_count": len(stale_before_release), "claims": _claim_metric_rows(stale_before_release)},
+        )
+
     return {
         "status": "ok" if discover_action.status in {"ok", "planned"} else discover_action.status,
         "contest_id": contest_id,
         "challenge_count": len(source_challenges),
         "canonical_count": canonical["counts"]["canonical_count"],
+        "new_count": len(new_keys),
+        "updated_count": len(updated_keys),
         "target_count": canonical["counts"]["claimable_count"],
         "alias_count": canonical["counts"]["alias_count"],
         "skipped_static_count": canonical["counts"]["skipped_static_count"],
-        "claimable_count": sum(1 for item in board["challenges"] if _claimable(root, item)),
+        "claimable_count": claimable_count,
+        "status_changes": status_changes[:50],
+        "stale_claim_count": len(stale_before_release),
         "canonical_map": canonical["map"],
         "warnings": sorted(set(warnings + canonical["warnings"])),
         "discover": _interactive_discover_public(discover_payload),
@@ -197,6 +260,18 @@ def sync_operator(
         "ingest": ingest_results,
         "board_path": _display(root / "board.json"),
     }
+
+
+def operator_status(contest_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    _write_board(root, board)
+    _write_board_md(root, board)
+    summary = _operator_status_summary(contest_id, root, board)
+    _record_no_work_metrics(root, contest_id, summary, source="status")
+    return summary
 
 
 def board_status(contest_id: str) -> dict[str, Any]:
@@ -304,19 +379,44 @@ def next_challenge(
     category: str | None = None,
     allow_duplicate: bool = False,
     dry_run: bool = False,
+    refresh: bool = False,
+    profile: str | Path | None = None,
 ) -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
+    refresh_result: dict[str, Any] | None = None
+    if refresh:
+        refresh_result = _refresh_operator_once(contest_id, root, profile)
+        if refresh_result.get("status") in {"blocked", "error", "auth_required", "rate_limited", "unexpected_response"}:
+            board = _read_board(root, contest_id)
+            _apply_runtime_statuses(root, board)
+            status_summary = _operator_status_summary(contest_id, root, board)
+            return {
+                "status": refresh_result.get("status") or "blocked",
+                "contest_id": contest_id,
+                "agent": agent,
+                "reason": refresh_result.get("reason") or "refresh_failed",
+                "refresh": refresh_result,
+                "completion_status": status_summary["completion_status"],
+                "no_useful_work": status_summary["no_useful_work"],
+                "status_summary": _compact_status_summary(status_summary),
+            }
     board = _read_board(root, contest_id)
     _apply_runtime_statuses(root, board)
     ranked = _rank_next_targets(root, contest_id, board, category=category, allow_duplicate=allow_duplicate)
     if not ranked:
+        status_summary = _operator_status_summary(contest_id, root, board)
+        _record_no_work_metrics(root, contest_id, status_summary, source="next")
         return {
             "status": "empty",
             "contest_id": contest_id,
             "agent": agent,
             "reason": "no_ranked_target",
             "category": category or "",
+            "completion_status": status_summary["completion_status"],
+            "no_useful_work": status_summary["no_useful_work"],
+            "status_summary": _compact_status_summary(status_summary),
+            **({"refresh": refresh_result} if refresh_result else {}),
         }
 
     selected = ranked[0]
@@ -334,6 +434,7 @@ def next_challenge(
         "target_pack_path": pack.get("target_pack_path", ""),
         "ranked_considered": len(ranked),
         "selected_status": selected["status"],
+        **({"refresh": refresh_result} if refresh_result else {}),
     }
     if dry_run:
         return {"status": "planned", **common, "claim": {"status": "dry_run"}}
@@ -576,19 +677,45 @@ def prepare_target(
     *,
     agent: str,
     challenge_id: str | None = None,
+    refresh: bool = False,
+    profile: str | Path | None = None,
 ) -> dict[str, Any]:
     init_operator(contest_id)
     selected: dict[str, Any] = {}
     effective_challenge = challenge_id
+    refresh_result: dict[str, Any] | None = None
+    if refresh and effective_challenge:
+        root = operator_root(contest_id)
+        refresh_result = _refresh_operator_once(contest_id, root, profile)
+        if refresh_result.get("status") in {"blocked", "error", "auth_required", "rate_limited", "unexpected_response"}:
+            board = _read_board(root, contest_id)
+            _apply_runtime_statuses(root, board)
+            status_summary = _operator_status_summary(contest_id, root, board)
+            return {
+                "status": refresh_result.get("status") or "blocked",
+                "contest_id": contest_id,
+                "agent": agent,
+                "reason": refresh_result.get("reason") or "refresh_failed",
+                "refresh": refresh_result,
+                "completion_status": status_summary["completion_status"],
+                "no_useful_work": status_summary["no_useful_work"],
+                "status_summary": _compact_status_summary(status_summary),
+            }
     if not effective_challenge:
-        selected = next_challenge(contest_id, agent=agent)
+        selected = next_challenge(contest_id, agent=agent, refresh=refresh, profile=profile)
+        refresh_result = selected.get("refresh") if isinstance(selected.get("refresh"), dict) else refresh_result
         if selected.get("status") not in {"claimed", "planned"}:
+            completion_status = selected.get("completion_status")
+            no_useful_work = bool(selected.get("no_useful_work"))
             return {
                 "status": selected.get("status") or "blocked",
                 "contest_id": contest_id,
                 "agent": agent,
                 "reason": selected.get("reason") or "no_target",
                 "selection": selected,
+                "completion_status": completion_status or "no_claimable",
+                "no_useful_work": no_useful_work,
+                "status_summary": selected.get("status_summary") or {},
             }
         effective_challenge = str(selected.get("challenge_id") or "")
     if not effective_challenge:
@@ -613,6 +740,7 @@ def prepare_target(
         "first_commands": triage.get("first_commands") or [],
         "next_steps": triage.get("next_steps") or [],
         "selection": selected,
+        **({"refresh": refresh_result} if refresh_result else {}),
     }
 
 
@@ -1876,12 +2004,27 @@ def memo_update(contest_id: str, *, challenge_id: str, kind: str, append: str | 
 
 def solver_prompt(contest_id: str, *, agent: str) -> dict[str, Any]:
     init_operator(contest_id)
+    root = operator_root(contest_id)
+    profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+    refresh_profile_arg = f" --profile {shlex.quote(profile_path)}" if profile_path and profile_path != "TODO" else ""
+    first_prepare = (
+        f"ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --refresh{refresh_profile_arg} --json"
+        if profile_path and profile_path != "TODO"
+        else f"ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --json"
+    )
+    next_command = (
+        f"ctfctl interactive next --contest-id {contest_id} --agent {agent} --refresh{refresh_profile_arg} --json"
+        if profile_path and profile_path != "TODO"
+        else f"ctfctl interactive next --contest-id {contest_id} --agent {agent} --json"
+    )
     text = f"""You are an autonomous interactive Codex CTF solver for contest {contest_id}, agent {agent}.
 
 Work from ~/CTF. Use ctfctl interactive commands as your coordination surface.
 
 Loop policy:
-- Do not solve one challenge and stop. Continue next/claim -> read target pack -> solve -> verify -> submit -> writeup -> cleanup -> next challenge until the contest ends, the user stops you, or no useful work remains.
+- Start with: {first_prepare}
+- Do not solve one challenge and stop. Continue next/claim -> read target pack -> solve -> verify -> submit -> writeup -> cleanup -> next challenge until the contest ends, the user stops you, or completion_status is all_solved or all_solved_or_stalled.
+- If completion_status is active, no_claimable, or needs_sync, keep going with ctfctl interactive status, prepare-target, next, or solve-loop as appropriate; do not stop after one problem.
 - Do not split into controller/solver roles. This Codex session is the solver.
 - Keep user-facing progress compact unless the user asks for detail.
 - Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
@@ -1889,13 +2032,15 @@ Loop policy:
 - If the user asks what you are doing, answer from ctfctl interactive brief or the current target pack without stopping the loop.
 
 Coordination:
-- Prefer the automated harness: ctfctl interactive solve-loop --contest-id {contest_id} --agent {agent} --json.
-- If you need manual control, prepare the target with: ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --json, then run ctfctl interactive run-attempt, inspect ctfctl interactive candidates, and verify with ctfctl interactive verify-candidate.
+- Use ctfctl interactive status --contest-id {contest_id} --json when no target is returned; stop only for all_solved or all_solved_or_stalled.
+- Prefer the automated harness after a target is prepared: ctfctl interactive solve-loop --contest-id {contest_id} --agent {agent} --challenge-id <id> --json.
+- Use {next_command} to claim the next target, with a single live refresh when a profile is configured.
+- If you need manual control, prepare the target with: {first_prepare}, then run ctfctl interactive run-attempt, inspect ctfctl interactive candidates, and verify with ctfctl interactive verify-candidate.
 - The prepare-target result claims or selects a challenge, writes target_pack_path, triage_summary_path, and starter_path. Read the target pack, triage summary, and starter before manual analysis.
 - If you manually claim with ctfctl interactive claim, immediately run ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --challenge-id <id> --json.
 - If prepare-target is unavailable, run ctfctl interactive target-pack, then ctfctl interactive triage, then ctfctl interactive starter for the same challenge.
 - Same-machine duplicate claims are blocked by default. Use --allow-duplicate only when the user explicitly wants duplicate solving.
-- If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then continue with solve-loop or ctfctl interactive next again.
+- If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then call status and continue with prepare-target/next/solve-loop unless completion_status says all_solved or all_solved_or_stalled.
 - Maintain memory.md, evidence.md, attempts.md, next_steps.md, and operator_notes.md for each challenge using ctfctl interactive memo.
 
 Submission and writeups:
@@ -1907,7 +2052,7 @@ Submission and writeups:
 
 After each challenge:
 - Run safe cleanup with ctfctl interactive cleanup --safe.
-- Claim or solve-loop the next eligible challenge and continue. Never stop after one problem unless the user stops you or no useful targets remain.
+- Call ctfctl interactive status, then prepare-target/next/solve-loop again. Never stop after one problem unless the user stops you, the contest ends, or completion_status is all_solved or all_solved_or_stalled.
 """
     return {"status": "ok", "contest_id": contest_id, "agent": agent, "prompt": text}
 
@@ -2797,6 +2942,237 @@ def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
             item["status"] = "todo"
 
 
+def _operator_status_summary(contest_id: str, root: Path, board: Mapping[str, Any]) -> dict[str, Any]:
+    buckets: dict[str, list[dict[str, Any]]] = {key: [] for key in ("todo", "claimed", "solved", "external_solved", "stalled", "skipped")}
+    items = [item for item in board.get("challenges", []) if isinstance(item, Mapping) and _status_countable_item(item)]
+    for item in items:
+        state = _completion_item_status(root, item)
+        buckets.setdefault(state, []).append(_challenge_public(item))
+    canonical_counts = board.get("canonical_counts") if isinstance(board.get("canonical_counts"), Mapping) else {}
+    canonical_count = _int_value(canonical_counts.get("canonical_count")) if canonical_counts else None
+    if canonical_count is None:
+        canonical_count = len(items)
+    alias_count = _int_value(canonical_counts.get("alias_count")) if canonical_counts else None
+    if alias_count is None:
+        alias_count = _computed_alias_count(board)
+    artifact_source_count = sum(len(_list_values(item.get("artifact_sources"))) for item in board.get("challenges", []) if isinstance(item, Mapping))
+    skipped_static_count = _int_value(canonical_counts.get("skipped_static_count")) if canonical_counts else None
+    if skipped_static_count is None:
+        skipped_static_count = sum(1 for item in board.get("challenges", []) if isinstance(item, Mapping) and (item.get("is_static_shell") or item.get("is_static_alias"))) + artifact_source_count
+    claimable_count = sum(1 for item in items if _claimable(root, item))
+    active_claims, stale_claims = _claim_rows(root, board)
+    counts = {
+        "todo": len(buckets["todo"]),
+        "claimed": len(buckets["claimed"]),
+        "solved": len(buckets["solved"]),
+        "external_solved": len(buckets["external_solved"]),
+        "stalled": len(buckets["stalled"]),
+        "skipped": len(buckets["skipped"]),
+        "canonical_count": canonical_count,
+        "alias_count": alias_count,
+        "artifact_sources_count": artifact_source_count,
+        "skipped_static_count": skipped_static_count,
+        "claimable_count": claimable_count,
+        "active_claim_count": len(active_claims),
+        "stale_claim_count": len(stale_claims),
+    }
+    completion_status = _completion_status(root, board, counts)
+    no_useful_work = completion_status in {"all_solved", "all_solved_or_stalled", "no_claimable"}
+    profile_path = str(board.get("profile_path") or _operator_config(root).get("profile_path") or "")
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "operator_root": _display(root),
+        "canonical_count": canonical_count,
+        "claimable_count": claimable_count,
+        "todo": counts["todo"],
+        "claimed": counts["claimed"],
+        "solved": counts["solved"],
+        "external_solved": counts["external_solved"],
+        "stalled": counts["stalled"],
+        "skipped": counts["skipped"],
+        "alias_count": alias_count,
+        "artifact_sources_count": artifact_source_count,
+        "artifact_source_count": artifact_source_count,
+        "skipped_static_count": skipped_static_count,
+        "active_local_claims": active_claims,
+        "stale_claims": stale_claims,
+        "no_useful_work": no_useful_work,
+        "completion_status": completion_status,
+        "counts": counts,
+        "challenges": buckets,
+        "canonical_map": board.get("canonical_map", {}),
+        "profile_path": profile_path,
+        "last_sync_at": board.get("last_sync_at") or "",
+    }
+
+
+def _completion_status(root: Path, board: Mapping[str, Any], counts: Mapping[str, Any]) -> str:
+    work_count = int(counts.get("todo") or 0) + int(counts.get("claimed") or 0) + int(counts.get("solved") or 0) + int(counts.get("external_solved") or 0) + int(counts.get("stalled") or 0)
+    if int(counts.get("todo") or 0) > 0 or int(counts.get("claimed") or 0) > 0:
+        return "active"
+    if int(counts.get("canonical_count") or 0) == 0 and _profile_configured(root, board) and not board.get("last_sync_at"):
+        return "needs_sync"
+    solved_total = int(counts.get("solved") or 0) + int(counts.get("external_solved") or 0)
+    if work_count > 0 and solved_total == work_count:
+        return "all_solved"
+    if work_count > 0 and solved_total + int(counts.get("stalled") or 0) == work_count:
+        return "all_solved_or_stalled"
+    if int(counts.get("claimable_count") or 0) == 0:
+        return "no_claimable"
+    return "active"
+
+
+def _completion_item_status(root: Path, item: Mapping[str, Any]) -> str:
+    if str(item.get("status") or "") == "external_solved" or item.get("solved_by_external"):
+        return "external_solved"
+    status = _challenge_status(root, item)
+    if status in {"solved", "claimed", "stalled", "skipped"}:
+        return status
+    if not _claimable_source(item):
+        return "skipped"
+    return "todo"
+
+
+def _status_countable_item(item: Mapping[str, Any]) -> bool:
+    if item.get("is_alias") or item.get("is_artifact_source") or item.get("artifact_source"):
+        return False
+    challenge_id = str(item.get("challenge_id") or "")
+    canonical_id = str(item.get("canonical_id") or challenge_id)
+    if item.get("is_static_alias") and _normalize(canonical_id) not in {"", _normalize(challenge_id)}:
+        return False
+    return True
+
+
+def _computed_alias_count(board: Mapping[str, Any]) -> int:
+    count = 0
+    for item in board.get("challenges", []):
+        if not isinstance(item, Mapping):
+            continue
+        count += len(_list_values(item.get("aliases")))
+        challenge_id = str(item.get("challenge_id") or "")
+        canonical_id = str(item.get("canonical_id") or challenge_id)
+        if item.get("is_alias") or (item.get("is_static_alias") and _normalize(canonical_id) not in {"", _normalize(challenge_id)}):
+            count += 1
+    return count
+
+
+def _profile_configured(root: Path, board: Mapping[str, Any]) -> bool:
+    profile_path = str(board.get("profile_path") or _operator_config(root).get("profile_path") or "").strip()
+    return bool(profile_path and profile_path != "TODO")
+
+
+def _compact_status_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "canonical_count",
+        "claimable_count",
+        "todo",
+        "claimed",
+        "solved",
+        "external_solved",
+        "stalled",
+        "skipped",
+        "alias_count",
+        "artifact_sources_count",
+        "completion_status",
+        "no_useful_work",
+    )
+    return {key: summary.get(key) for key in keys}
+
+
+def _claim_rows(root: Path, board: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    active: list[dict[str, Any]] = []
+    stale: list[dict[str, Any]] = []
+    for path in sorted((root / "claims").glob("*.lock")):
+        data = _read_json_file(path)
+        item = _find_claimed_item(board, data)
+        state = _completion_item_status(root, item) if item else "not_found"
+        is_stale = state in {"solved", "external_solved", "stalled", "skipped", "not_found"}
+        row = {
+            "agent": data.get("agent") or "",
+            "challenge_id": data.get("challenge_id") or (item.get("challenge_id") if item else ""),
+            "name": data.get("name") or (item.get("name") if item else ""),
+            "canonical_id": data.get("canonical_id") or (item.get("canonical_id") if item else ""),
+            "category": data.get("category") or (item.get("category") if item else ""),
+            "claimed_at": data.get("claimed_at") or "",
+            "allow_duplicate": bool(data.get("allow_duplicate")),
+            "lock_path": _display(path),
+            "challenge_status": state,
+            "stale": is_stale,
+        }
+        (stale if is_stale else active).append(row)
+    return active, stale
+
+
+def _find_claimed_item(board: Mapping[str, Any], data: Mapping[str, Any]) -> dict[str, Any] | None:
+    for value in [
+        data.get("challenge_id"),
+        data.get("canonical_id"),
+        data.get("canonical_name"),
+        data.get("name"),
+        *_list_values(data.get("aliases")),
+        *_list_values(data.get("source_ids")),
+        *_list_values(data.get("artifact_sources")),
+    ]:
+        text = str(value or "")
+        if not text:
+            continue
+        item = _find_challenge(board, text)
+        if item is not None:
+            return item
+    return None
+
+
+def _stale_claims(root: Path, board: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return _claim_rows(root, board)[1]
+
+
+def _claim_metric_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "agent": row.get("agent") or "",
+            "challenge_id": row.get("challenge_id") or "",
+            "challenge_status": row.get("challenge_status") or "",
+            "claimed_at": row.get("claimed_at") or "",
+        }
+        for row in list(rows)[:50]
+    ]
+
+
+def _record_no_work_metrics(root: Path, contest_id: str, summary: Mapping[str, Any], *, source: str) -> None:
+    stale_claims = summary.get("stale_claims") if isinstance(summary.get("stale_claims"), list) else []
+    if stale_claims:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="stale_claims_detected",
+            data={"source": source, "stale_count": len(stale_claims), "claims": _claim_metric_rows(stale_claims)},
+        )
+    if summary.get("no_useful_work"):
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="no_useful_work",
+            data={**_compact_status_summary(summary), "source": source},
+        )
+
+
+def _refresh_operator_once(contest_id: str, root: Path, profile: str | Path | None) -> dict[str, Any]:
+    resolved = _refresh_profile_path(root, profile)
+    if not resolved:
+        return {"status": "blocked", "contest_id": contest_id, "reason": "profile_required_for_refresh"}
+    return sync_operator(contest_id, profile=resolved, live=True)
+
+
+def _refresh_profile_path(root: Path, profile: str | Path | None) -> str | None:
+    if profile:
+        return str(Path(profile).expanduser())
+    configured = str(_operator_config(root).get("profile_path") or "").strip()
+    if not configured or configured == "TODO":
+        return None
+    return str(_expand_display_path(configured))
+
+
 def _claimable_source(item: Mapping[str, Any]) -> bool:
     if item.get("is_alias") or item.get("is_static_alias") or item.get("is_static_shell") or item.get("is_artifact_source") or item.get("artifact_source"):
         return False
@@ -2942,6 +3318,68 @@ def _challenge_release_values(item: Mapping[str, Any]) -> list[str]:
     return result
 
 
+def _sync_signatures(root: Path, items: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    signatures: dict[str, str] = {}
+    for item in items:
+        if not _status_countable_item(item):
+            continue
+        key = _sync_key(item)
+        if not key:
+            continue
+        payload = {
+            "challenge_id": item.get("challenge_id") or "",
+            "canonical_id": item.get("canonical_id") or "",
+            "canonical_name": item.get("canonical_name") or "",
+            "name": item.get("name") or "",
+            "category": item.get("category") or "",
+            "points": item.get("points"),
+            "solves": item.get("solves"),
+            "statement": item.get("statement") or "",
+            "has_files": bool(item.get("has_files")),
+            "file_count": _int_value(item.get("file_count")) or 0,
+            "attachment_count": _int_value(item.get("attachment_count")) or 0,
+            "link_count": _int_value(item.get("link_count")) or 0,
+            "aliases": sorted(str(value) for value in _list_values(item.get("aliases"))),
+            "artifact_sources": sorted(str(value) for value in _list_values(item.get("artifact_sources"))),
+            "source_ids": sorted(str(value) for value in _list_values(item.get("source_ids"))),
+            "platform_solved": bool(item.get("platform_solved")),
+            "status": _completion_item_status(root, item),
+            "claimable": bool(item.get("claimable", True)),
+        }
+        signatures[key] = json.dumps(payload, sort_keys=True, default=str)
+    return signatures
+
+
+def _sync_statuses(root: Path, items: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for item in items:
+        if not _status_countable_item(item):
+            continue
+        key = _sync_key(item)
+        if key:
+            statuses[key] = _completion_item_status(root, item)
+    return statuses
+
+
+def _sync_public_ids(items: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in items:
+        if not _status_countable_item(item):
+            continue
+        key = _sync_key(item)
+        if key:
+            result[key] = str(item.get("challenge_id") or item.get("canonical_id") or item.get("name") or key)
+    return result
+
+
+def _sync_key(item: Mapping[str, Any]) -> str:
+    for value in (item.get("canonical_id"), item.get("challenge_id"), item.get("canonical_name"), item.get("name")):
+        key = _normalize(str(value or ""))
+        if key:
+            return key
+    return ""
+
+
 def _external_solved_lines(item: Mapping[str, Any], challenge: str) -> list[str]:
     seen: set[str] = set()
     lines: list[str] = []
@@ -2969,7 +3407,6 @@ def _rank_next_targets(
     allow_duplicate: bool,
 ) -> list[dict[str, Any]]:
     fresh: list[tuple[dict[str, Any], str]] = []
-    retry_stalled: list[tuple[dict[str, Any], str]] = []
     duplicate_claimed: list[tuple[dict[str, Any], str]] = []
     for raw_item in board.get("challenges", []):
         if not isinstance(raw_item, dict):
@@ -2982,12 +3419,10 @@ def _rank_next_targets(
         status = _challenge_status(root, item)
         if status == "todo":
             fresh.append((item, status))
-        elif status == "stalled" and _stalled_has_clear_next_step(contest_id, item):
-            retry_stalled.append((item, status))
         elif status == "claimed" and allow_duplicate:
             duplicate_claimed.append((item, status))
 
-    selected_pool = fresh or retry_stalled or duplicate_claimed
+    selected_pool = fresh or duplicate_claimed
     ranked: list[dict[str, Any]] = []
     for item, status in selected_pool:
         score, reasons = _target_score(root, contest_id, item, status=status)

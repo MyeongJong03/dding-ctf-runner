@@ -76,6 +76,7 @@ from .interactive import (
     metrics_report as interactive_metrics_report,
     metrics_summary as interactive_metrics_summary,
     next_challenge as interactive_next_challenge,
+    operator_status as interactive_operator_status,
     prepare_target as interactive_prepare_target,
     release_claim as interactive_release_claim,
     run_attempt as interactive_run_attempt,
@@ -344,6 +345,12 @@ def _cmd_interactive_board(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_interactive_status(args: argparse.Namespace) -> int:
+    data = interactive_operator_status(args.contest_id)
+    _print_json(data)
+    return 0
+
+
 def _cmd_interactive_claim(args: argparse.Namespace) -> int:
     data = interactive_claim_challenge(
         args.contest_id,
@@ -362,6 +369,8 @@ def _cmd_interactive_next(args: argparse.Namespace) -> int:
         category=args.category,
         allow_duplicate=args.allow_duplicate,
         dry_run=args.dry_run,
+        refresh=args.refresh,
+        profile=args.profile,
     )
     _print_json(data)
     return 0 if data.get("status") not in {"blocked", "error"} else 1
@@ -405,9 +414,9 @@ def _cmd_interactive_starter(args: argparse.Namespace) -> int:
 
 
 def _cmd_interactive_prepare_target(args: argparse.Namespace) -> int:
-    data = interactive_prepare_target(args.contest_id, agent=args.agent, challenge_id=args.challenge_id)
+    data = interactive_prepare_target(args.contest_id, agent=args.agent, challenge_id=args.challenge_id, refresh=args.refresh, profile=args.profile)
     _print_json(data)
-    return 0 if data.get("status") == "ok" else 1
+    return 0 if data.get("status") == "ok" or data.get("no_useful_work") else 1
 
 
 def _cmd_interactive_run_attempt(args: argparse.Namespace) -> int:
@@ -2200,6 +2209,10 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_board.add_argument("--contest-id", required=True)
     interactive_board.add_argument("--json", action="store_true")
     interactive_board.set_defaults(func=_cmd_interactive_board)
+    interactive_status = interactive_sub.add_parser("status")
+    interactive_status.add_argument("--contest-id", required=True)
+    interactive_status.add_argument("--json", action="store_true")
+    interactive_status.set_defaults(func=_cmd_interactive_status)
     interactive_claim = interactive_sub.add_parser("claim")
     interactive_claim.add_argument("--contest-id", required=True)
     interactive_claim.add_argument("--agent", required=True)
@@ -2213,6 +2226,8 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_next.add_argument("--category")
     interactive_next.add_argument("--allow-duplicate", action="store_true")
     interactive_next.add_argument("--dry-run", action="store_true")
+    interactive_next.add_argument("--refresh", action="store_true")
+    interactive_next.add_argument("--profile")
     interactive_next.add_argument("--json", action="store_true")
     interactive_next.set_defaults(func=_cmd_interactive_next)
     interactive_target_pack = interactive_sub.add_parser("target-pack")
@@ -2238,6 +2253,8 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prepare_target.add_argument("--contest-id", required=True)
     interactive_prepare_target.add_argument("--agent", required=True)
     interactive_prepare_target.add_argument("--challenge-id")
+    interactive_prepare_target.add_argument("--refresh", action="store_true")
+    interactive_prepare_target.add_argument("--profile")
     interactive_prepare_target.add_argument("--json", action="store_true")
     interactive_prepare_target.set_defaults(func=_cmd_interactive_prepare_target)
     interactive_run_attempt = interactive_sub.add_parser("run-attempt")
