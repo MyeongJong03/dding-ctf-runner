@@ -70,6 +70,8 @@ Sync and board canonicalization:
 Target planning and claim:
 
 ```bash
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --max-attempts 5 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
@@ -77,6 +79,9 @@ ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --category we
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category web --json
+ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 120 --json
+ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge <id> --json
@@ -84,7 +89,9 @@ ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge 
 
 Default claim returns only canonical rows where `claimable` is true. If a solver requests an alias or static slug with `--challenge`, the claim resolves to the canonical challenge and returns the canonical path/name.
 
-`interactive next` is the preferred solver entrypoint. It scores only canonical claimable rows by practical solve signal:
+`interactive solve-loop` is the preferred solver entrypoint. It scores or prepares a target, ensures target pack/triage/starter, runs the starter in the challenge directory, records a structured attempt, extracts local candidates, verifies candidate confidence and submit guards, submits only high-confidence candidates, and performs accepted-only writeup plus cleanup when accepted. If it reaches `--max-attempts` without an accepted candidate, it updates attempts/evidence/next steps, records stalled metrics, creates no writeup, and returns the next action so the Codex keeps moving to another problem.
+
+`interactive next` scores only canonical claimable rows by practical solve signal:
 
 - positive: local attachments or downloaded handout files, detected remote endpoints, confident category, previous memory/evidence/attempts/operator notes, and clear `next_steps`
 - retryable: stalled challenges with concrete `next_steps` when no fresh todo target remains
@@ -109,6 +116,8 @@ Pack generation redacts auth-like material and excludes raw cookies, tokens, ses
 `interactive triage` reads only local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started` and `triage_completed` metrics.
 
 `interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with a `requests.Session`, `exploit.py` with pwntools, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
+
+`interactive run-attempt` executes `--command` or `--script` from the challenge directory. It stores raw local stdout/stderr/returncode/runtime in `attempts/<timestamp>.json`, appends compact entries to `attempts.md` and `evidence.md`, records `attempt_started` and `attempt_completed` metrics, and extracts flag-like candidates into `candidates.jsonl`. `interactive candidates` lists the local candidate store with raw values for local solving. `interactive verify-candidate` reads a passed value, candidate file, or latest local candidate, then checks format, duplicate hash, fake-like markers, previous wrong submissions, and confidence before submit.
 
 `interactive brief` prints a compact status view for a target. Use it when the operator asks "지금 뭐 하고 있음?" so a Codex can answer from local state and keep moving.
 
@@ -201,6 +210,8 @@ The operator directory contains:
 - `external_solved.txt`: challenge IDs solved outside this local machine.
 - `stalled.jsonl`: compact stalled handoffs.
 - `submissions.jsonl`: flag hashes or artifact SHA-256/size/status records, with no raw auth material.
+- per-challenge `attempts/`: raw local attempt JSON, including stdout/stderr.
+- per-challenge `candidates.jsonl`: local raw candidate store with evidence source, command, timestamp, hash, length, and verification status.
 - `claims/`: same-machine claim lock files.
 - `memos/`: per-challenge memo files.
 
@@ -281,7 +292,7 @@ metrics/summary.json
 metrics/regression_report.md
 ```
 
-The claim, release, stalled, external-solved, submit, artifact upload, writeup, and cleanup
+The claim, release, stalled, external-solved, attempt, candidate verification, submit, artifact upload, writeup, and cleanup
 commands record events where practical. Manual observations can be appended:
 
 ```bash
@@ -295,7 +306,7 @@ ctfctl interactive metrics dashboard --json
 ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
 ```
 
-The summary includes event counts, session count, claimed/solved/stalled/submit
+The summary includes event counts, session count, claimed/attempt/solved/stalled/submit
 counts, artifact submitted/accepted/rejected/blocked counts,
 accepted/writeup/cleanup counts, observed token totals when present, and average
 time to solve when claim and solve timestamps are available.
@@ -306,10 +317,11 @@ public-safe snapshots only. `publish-snapshot` creates
 `approaches.public.md`, and `regression.public.md` under
 `metrics/contests/<contest-id>` by default. These files may include challenge
 names, categories, elapsed times, high-level approach labels, stalled blockers,
-counts, observed token totals, and artifact upload SHA-256/size/status, but must
-not include raw flags, cookies, sessions, browser storage, private keys, auth
-material, artifact contents, local artifact paths, upload endpoints, raw
-responses, exploit bodies, or full writeup bodies.
+counts, observed token totals, candidate hash/length/source/status metadata, and
+artifact upload SHA-256/size/status, but must not include raw candidates, raw
+flags, cookies, sessions, browser storage, private keys, auth material, artifact
+contents, local artifact paths, upload endpoints, raw responses, exploit bodies,
+or full writeup bodies.
 
 During an active contest, do not upload contest writeups, flags, exploits, or
 private artifacts. Public snapshot export is blocked unless the contest is ended
@@ -318,7 +330,7 @@ with `--contest-ended` or the operator explicitly provides both
 stalled metrics with memo/attempts/next_steps, not writeups. After an accepted
 solve, use submit or accepted/active upload-submit -> writeup ko/en -> cleanup
 -> metrics update -> next challenge. After a stall, use
-memo/attempts/next_steps -> metrics update -> next challenge. At contest end,
+attempts/next_steps -> stalled metrics update -> next challenge. At contest end,
 use publish-snapshot -> dashboard -> optional git commit.
 
 ## Pre-Release Check

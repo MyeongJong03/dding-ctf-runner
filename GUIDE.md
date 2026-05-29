@@ -154,7 +154,8 @@ Paste a different generated prompt into each Codex session. These are CTF-solvin
 
 Each solver should:
 
-- run `interactive prepare-target` to pick or prepare one high-signal canonical challenge
+- run `interactive solve-loop` to pick or prepare one high-signal canonical challenge and execute the starter harness
+- use `prepare-target -> run-attempt -> candidates -> verify-candidate` when manual experiment control is needed
 - read the generated target pack, triage summary, and starter before solving
 - solve and verify locally
 - submit only through `ctfctl interactive submit` or `upload-submit`
@@ -184,9 +185,13 @@ ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 Prepare a target for immediate solving:
 
 ```bash
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --max-attempts 5 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id-or-alias> --json
 ```
+
+`solve-loop` is the standard experiment harness. It runs `prepare-target` when needed, executes the starter in the challenge directory, records `attempts/<timestamp>.json`, updates `attempts.md` and `evidence.md`, detects local candidates, verifies format/duplicate/fake-like/previous-wrong guards, and submits only high-confidence candidates through the interactive submit path. If accepted, it writes ko/en writeups, runs safe cleanup, updates metrics, and the solver continues to the next challenge. If no accepted candidate appears after `--max-attempts`, it updates `next_steps.md`, records stalled metrics, creates no writeup, and continues to the next challenge.
 
 `prepare-target` runs the target planner, target pack, local auto-triage, and starter generation as one shell-first step. If `--challenge-id` is omitted, it runs `interactive next`; otherwise it prepares the specified canonical challenge or alias. The JSON returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. Read the target pack, triage summary, and starter file before manual analysis.
 
@@ -206,6 +211,17 @@ ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alia
 ```
 
 `triage` never connects to external CTF services. It reads local raw/handout/extracted files, `brief.md`, manifests, and memos, then writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`. It updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `starter` creates a category-specific skeleton such as `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, or `solve_misc.py`, and records the path in board/operator metadata. These commands do not create writeups; writeups remain accepted-only.
+
+Run and verify manual experiments:
+
+```bash
+ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 120 --json
+ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --command "python3 solve.py" --json
+ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+`run-attempt` executes from the challenge directory and stores raw local stdout/stderr/returncode/runtime in `attempts/`. It appends compact attempt/evidence notes and records `attempt_started`/`attempt_completed` metrics. Raw candidates are allowed in local terminal output and `candidates.jsonl`; public-safe snapshots use only hash, length, source, status, confidence, and timestamp.
 
 Compact current-target status:
 
@@ -353,9 +369,9 @@ ctfctl interactive metrics dashboard --json
 ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
 ```
 
-`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, observed token totals when present, and artifact upload SHA-256/size/status when present. They must not include raw flags, writeup bodies, exploit bodies, artifact contents, upload endpoints, local artifact paths, cookies, sessions, browser storage, private keys, raw responses, or auth material.
+`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, observed token totals when present, candidate hash/length/source/status metadata, and artifact upload SHA-256/size/status when present. They must not include raw candidates, raw flags, writeup bodies, exploit bodies, artifact contents, upload endpoints, local artifact paths, cookies, sessions, browser storage, private keys, raw responses, or auth material.
 
-During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit or accepted/active artifact upload -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: memo/attempts/next_steps -> metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
+During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit or accepted/active artifact upload -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: attempts/next_steps -> stalled metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
 
 ## 9. Callback, Docker, Submit, And Cleanup Helpers
 

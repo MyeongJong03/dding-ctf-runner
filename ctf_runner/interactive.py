@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,7 @@ from .platform_base import action_to_dict
 from .platform_ctfd import load_platform_adapter
 from .redact import redact_text
 from .state import utc_now
-from .submit import hash_flag, load_submit_policy, should_submit
+from .submit import classify_flag_confidence, detect_flag_candidates, hash_flag, load_submit_policy, should_submit
 
 
 MEMO_KINDS = ("memory", "evidence", "attempts", "next_steps", "operator_notes")
@@ -615,6 +616,413 @@ def prepare_target(
     }
 
 
+def run_attempt(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    agent: str | None = None,
+    command: str | None = None,
+    script: str | Path | None = None,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved = _resolve_attempt_invocation(root, board, item, challenge_key, challenge_dir, command=command, script=script)
+    if resolved.get("status") != "ok":
+        _append_text(
+            challenge_dir / "next_steps.md",
+            f"\n- {utc_now()} run-attempt blocked: {resolved.get('reason') or 'command_or_script_missing'}\n",
+        )
+        return {
+            "status": "blocked",
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "agent": agent or "",
+            "reason": resolved.get("reason") or "command_or_script_missing",
+        }
+
+    timeout = max(1, int(timeout or 120))
+    command_display = str(resolved["command_display"])
+    started = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="attempt_started",
+        agent=agent,
+        challenge_id=challenge_key,
+        data={"command": redact_text(command_display), "timeout_sec": timeout},
+    )
+    started_at = str(started.get("timestamp") or utc_now())
+    attempt_dir = challenge_dir / "attempts"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_path = attempt_dir / f"{_timestamp_filename(started_at)}.json"
+
+    start = time.perf_counter()
+    stdout = ""
+    stderr = ""
+    timed_out = False
+    returncode: int | None = None
+    error = ""
+    try:
+        completed = subprocess.run(
+            resolved["argv"],
+            cwd=challenge_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=bool(resolved.get("shell")),
+            timeout=timeout,
+            check=False,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        returncode = int(completed.returncode)
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = _process_output_text(exc.stdout)
+        stderr = _process_output_text(exc.stderr)
+        returncode = None
+        error = "timeout"
+    except OSError as exc:
+        stdout = ""
+        stderr = str(exc)
+        returncode = -1
+        error = "execution_error"
+    runtime_sec = round(time.perf_counter() - start, 3)
+    completed_at = utc_now()
+
+    policy = load_submit_policy()
+    detected = _detect_attempt_candidates(
+        contest_id,
+        challenge_key,
+        stdout=stdout,
+        stderr=stderr,
+        command=command_display,
+        attempt_path=attempt_path,
+        timestamp=completed_at,
+        policy=policy,
+    )
+    stored_candidates = _append_detected_candidates(challenge_dir, detected)
+    attempt_record = {
+        "schema": "interactive_attempt_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "script": _display(Path(resolved["script_path"])) if resolved.get("script_path") else "",
+        "timeout_sec": timeout,
+        "timed_out": timed_out,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_len": len(stdout),
+        "stderr_len": len(stderr),
+        "error": error,
+        "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+        "candidate_count": len(detected),
+        "stored_candidate_count": len(stored_candidates),
+    }
+    _write_json_raw(attempt_path, attempt_record)
+    _append_attempt_markdown(challenge_dir, attempt_record, attempt_path, detected)
+    _append_attempt_evidence(challenge_dir, attempt_record, attempt_path, detected)
+
+    completed_event = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="attempt_completed",
+        agent=agent,
+        challenge_id=challenge_key,
+        data={
+            "command": redact_text(command_display),
+            "returncode": returncode,
+            "runtime_sec": runtime_sec,
+            "timed_out": timed_out,
+            "stdout_len": len(stdout),
+            "stderr_len": len(stderr),
+            "candidate_count": len(detected),
+            "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+            "attempt_path": _display(attempt_path),
+        },
+    )
+    return {
+        "status": "ok" if not timed_out and returncode == 0 else ("timeout" if timed_out else "completed_nonzero"),
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "attempt_path": _display(attempt_path),
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "timed_out": timed_out,
+        "stdout": stdout,
+        "stderr": stderr,
+        "candidates": [_candidate_local_payload(row) for row in detected],
+        "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
+        "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
+    }
+
+
+def list_candidates(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    rows = _coalesced_candidates(challenge_dir)
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "candidate_store": _display(_candidate_store_path(challenge_dir)),
+        "count": len(rows),
+        "candidates": [_candidate_local_payload(row) for row in rows],
+    }
+
+
+def verify_candidate(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    candidate: str | None = None,
+    candidate_file: str | Path | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+
+    selected = _select_candidate_for_verification(challenge_dir, candidate=candidate, candidate_file=candidate_file)
+    value = str(selected.get("value") or "")
+    if not value:
+        return {"status": "blocked", "reason": "candidate_missing", "contest_id": contest_id, "challenge_id": challenge_key}
+
+    policy = load_submit_policy()
+    submissions = _read_jsonl(root / "submissions.jsonl")
+    previous = [row for row in submissions if str(row.get("challenge_id")) == challenge_key]
+    context = _verification_context(selected)
+    classification = classify_flag_confidence(value, context=context, policy=policy)
+    decision = should_submit(
+        value,
+        policy,
+        previous_submissions=previous,
+        challenge_state={"challenge_id": challenge_key, "status": item.get("status") or "todo", "solved": _is_solved(root, item)},
+        context=context,
+    )
+    digest = str(classification.get("flag_hash") or hash_flag(value))
+    duplicate = any(str(row.get("flag_hash") or "") == digest and str(row.get("status") or "").lower() in {"submitted", "accepted", "rejected", "rate_limited", "wrong", "incorrect"} for row in previous)
+    previous_wrong = [row for row in previous if str(row.get("status") or "").lower() in {"wrong", "incorrect", "rejected"}]
+    confidence = str(classification.get("confidence") or "none")
+    verification_status = _verification_status(confidence, decision, classification, duplicate)
+
+    record = {
+        "schema": "interactive_candidate_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "value": value,
+        "flag_hash": digest,
+        "length": len(value),
+        "source": str(selected.get("source") or "manual_candidate"),
+        "evidence_source": str(selected.get("evidence_source") or ""),
+        "command": str(selected.get("command") or ""),
+        "timestamp": utc_now(),
+        "status": verification_status,
+        "confidence": confidence,
+        "fake_likely": bool(classification.get("fake_likely")),
+        "matches_flag_regex": bool(classification.get("matches_flag_regex")),
+        "duplicate": duplicate,
+        "previous_wrong_count": len(previous_wrong),
+        "decision": {key: value for key, value in decision.items() if key != "candidate_preview"},
+    }
+    _append_jsonl_raw(_candidate_store_path(challenge_dir), record)
+    _append_candidate_verification_evidence(challenge_dir, record)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="candidate_verified",
+        challenge_id=challenge_key,
+        data={
+            "flag_hash": digest,
+            "length": len(value),
+            "source": record["source"],
+            "status": verification_status,
+            "confidence": confidence,
+            "fake_likely": bool(classification.get("fake_likely")),
+            "duplicate": duplicate,
+            "previous_wrong_count": len(previous_wrong),
+            "submit_allowed": bool(decision.get("allowed")),
+            "reason": decision.get("reason"),
+        },
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "candidate": value,
+        "candidate_hash": digest,
+        "length": len(value),
+        "confidence": confidence,
+        "verification_status": verification_status,
+        "format_valid": bool(classification.get("matches_flag_regex")),
+        "fake_likely": bool(classification.get("fake_likely")),
+        "duplicate": duplicate,
+        "previous_wrong_count": len(previous_wrong),
+        "submit_allowed": bool(decision.get("allowed")),
+        "reason": decision.get("reason"),
+        "classification": classification,
+        "decision": {key: value for key, value in decision.items() if key != "candidate_preview"},
+        "candidate_store": _display(_candidate_store_path(challenge_dir)),
+    }
+
+
+def solve_loop(
+    contest_id: str,
+    *,
+    agent: str,
+    challenge_id: str | None = None,
+    max_attempts: int = 5,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    prepared = prepare_target(contest_id, agent=agent, challenge_id=challenge_id)
+    if prepared.get("status") != "ok":
+        return {
+            "status": prepared.get("status") or "blocked",
+            "contest_id": contest_id,
+            "agent": agent,
+            "reason": prepared.get("reason") or "prepare_target_failed",
+            "prepare_target": prepared,
+        }
+
+    challenge_key = str(prepared.get("challenge_id") or challenge_id or "")
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    item = _find_challenge(board, challenge_key) or {"challenge_id": challenge_key, "name": challenge_key, "category": prepared.get("category") or ""}
+    challenge_dir = _challenge_path(contest_id, item)
+    starter_path = str(prepared.get("starter_path") or "")
+    if not starter_path:
+        starter = starter_challenge(contest_id, challenge_id=challenge_key, category=str(prepared.get("category") or ""))
+        starter_path = str(starter.get("starter_path") or "")
+    starter_fs_path = _undisplay_path(starter_path) if starter_path else None
+    if not starter_fs_path or not starter_fs_path.exists():
+        _append_text(challenge_dir / "next_steps.md", f"\n- {utc_now()} solve-loop blocked: starter file missing\n")
+        stalled = mark_stalled(contest_id, agent=agent, challenge=challenge_key, reason="solve-loop could not find a starter file to execute")
+        return {
+            "status": "stalled",
+            "contest_id": contest_id,
+            "agent": agent,
+            "challenge_id": challenge_key,
+            "reason": "starter_missing",
+            "prepare_target": prepared,
+            "stalled": stalled,
+            "next_action": "Run ctfctl interactive solve-loop again to continue with the next challenge.",
+        }
+
+    attempts: list[dict[str, Any]] = []
+    verifications: list[dict[str, Any]] = []
+    submit_results: list[dict[str, Any]] = []
+    limit = max(1, int(max_attempts or 5))
+    for attempt_index in range(1, limit + 1):
+        attempt = run_attempt(
+            contest_id,
+            challenge_id=challenge_key,
+            agent=agent,
+            script=starter_fs_path,
+            timeout=120,
+        )
+        attempts.append(attempt)
+        for candidate_row in attempt.get("candidates") or []:
+            value = str(candidate_row.get("value") or "")
+            if not value:
+                continue
+            verification = verify_candidate(contest_id, challenge_id=challenge_key, candidate=value)
+            verifications.append(verification)
+            if verification.get("confidence") != "high" or not verification.get("submit_allowed"):
+                continue
+            submit_plan = _solve_loop_submit_plan(contest_id, challenge_key, verification)
+            submit_result = _submit_candidate_value(contest_id, challenge_key, value, challenge_dir=challenge_dir)
+            submit_result["submit_plan"] = submit_plan
+            submit_results.append(submit_result)
+            if submit_result.get("status") == "accepted":
+                category = str(prepared.get("category") or item.get("category") or "misc")
+                _write_solve_loop_summary(challenge_dir, contest_id=contest_id, challenge_id=challenge_key, category=category, verification=verification, submit_result=submit_result)
+                writeup = writeup_challenge(
+                    contest_id,
+                    challenge_id=challenge_key,
+                    category=category,
+                    languages="ko,en",
+                    include_code=True,
+                )
+                cleanup = cleanup_challenge(contest_id, challenge_id=challenge_key, safe=True)
+                summary = metrics_summary(contest_id)
+                return {
+                    "status": "solved",
+                    "contest_id": contest_id,
+                    "agent": agent,
+                    "challenge_id": challenge_key,
+                    "category": category,
+                    "prepare_target": prepared,
+                    "attempts": attempts,
+                    "verifications": verifications,
+                    "submit": submit_result,
+                    "writeup": writeup,
+                    "cleanup": cleanup,
+                    "metrics_summary": summary,
+                    "next_action": "Continue with ctfctl interactive solve-loop --contest-id <contest> --agent <agent> --json for the next challenge.",
+                }
+            if submit_result.get("status") in {"planned", "blocked"}:
+                _append_text(
+                    challenge_dir / "next_steps.md",
+                    f"\n- {utc_now()} submit not accepted yet: {submit_result.get('status')} ({submit_result.get('reason') or 'no reason'}). Continue with the next experiment or submit manually when ready.\n",
+                )
+                return {
+                    "status": "submit_planned",
+                    "contest_id": contest_id,
+                    "agent": agent,
+                    "challenge_id": challenge_key,
+                    "prepare_target": prepared,
+                    "attempts": attempts,
+                    "verifications": verifications,
+                    "submit": submit_result,
+                    "next_action": "Resolve the submit blocker, then continue the solve loop without stopping after this challenge.",
+                }
+        _append_text(
+            challenge_dir / "next_steps.md",
+            f"\n- {utc_now()} solve-loop attempt {attempt_index}/{limit}: no accepted high-confidence candidate yet; inspect {attempt.get('attempt_path') or 'latest attempt'} and run the next experiment.\n",
+        )
+
+    reason = f"solve-loop reached max attempts ({limit}) without an accepted high-confidence candidate"
+    stalled = mark_stalled(contest_id, agent=agent, challenge=challenge_key, reason=reason)
+    summary = metrics_summary(contest_id)
+    return {
+        "status": "stalled",
+        "contest_id": contest_id,
+        "agent": agent,
+        "challenge_id": challenge_key,
+        "prepare_target": prepared,
+        "attempts": attempts,
+        "verifications": verifications,
+        "submit_results": submit_results,
+        "stalled": stalled,
+        "metrics_summary": summary,
+        "next_action": "Continue with ctfctl interactive solve-loop --contest-id <contest> --agent <agent> --json for the next challenge.",
+    }
+
+
 def release_claim(contest_id: str, *, agent: str, challenge: str | None = None, reason: str = "") -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
@@ -1099,6 +1507,7 @@ def metrics_compare(before: str | Path, after: str | Path) -> dict[str, Any]:
         "total_events",
         "sessions",
         "claimed_count",
+        "attempt_count",
         "solved_count",
         "stalled_count",
         "submitted_count",
@@ -1155,6 +1564,7 @@ def metrics_publish_snapshot(
     challenge_index = _public_challenge_index(board, contest_events, root)
     attempts_total = _attempts_total(contest_events)
     artifact_submissions = _public_artifact_submissions(root, contest_id)
+    candidates_public = _public_candidates(root, board)
 
     summary_public = {
         **summary,
@@ -1165,6 +1575,8 @@ def metrics_publish_snapshot(
         "snapshot_generated_at": utc_now(),
         "challenge_count": len(challenge_index),
         "attempts_total": attempts_total,
+        "candidate_count": len(candidates_public),
+        "candidates": candidates_public,
         "artifact_submissions": artifact_submissions,
         "artifact_submission_count": len(artifact_submissions),
     }
@@ -1276,6 +1688,10 @@ def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None =
             "starter": True,
             "prepare_target": True,
             "brief": True,
+            "run_attempt": True,
+            "candidates": True,
+            "verify_candidate": True,
+            "solve_loop": True,
         },
         "prompt_policy_summary": {
             "local_raw_flag_output_allowed": True,
@@ -1422,6 +1838,7 @@ def metrics_report(contest_id: str, *, output: str | Path | None = None) -> dict
         f"- total_events: {summary['total_events']}",
         f"- sessions: {summary['sessions']}",
         f"- claimed_count: {summary['claimed_count']}",
+        f"- attempt_count: {summary.get('attempt_count', 0)}",
         f"- solved_count: {summary['solved_count']}",
         f"- stalled_count: {summary['stalled_count']}",
         f"- submitted_count: {summary['submitted_count']}",
@@ -1472,12 +1889,13 @@ Loop policy:
 - If the user asks what you are doing, answer from ctfctl interactive brief or the current target pack without stopping the loop.
 
 Coordination:
-- Prefer target preparation with: ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --json.
+- Prefer the automated harness: ctfctl interactive solve-loop --contest-id {contest_id} --agent {agent} --json.
+- If you need manual control, prepare the target with: ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --json, then run ctfctl interactive run-attempt, inspect ctfctl interactive candidates, and verify with ctfctl interactive verify-candidate.
 - The prepare-target result claims or selects a challenge, writes target_pack_path, triage_summary_path, and starter_path. Read the target pack, triage summary, and starter before manual analysis.
 - If you manually claim with ctfctl interactive claim, immediately run ctfctl interactive prepare-target --contest-id {contest_id} --agent {agent} --challenge-id <id> --json.
 - If prepare-target is unavailable, run ctfctl interactive target-pack, then ctfctl interactive triage, then ctfctl interactive starter for the same challenge.
 - Same-machine duplicate claims are blocked by default. Use --allow-duplicate only when the user explicitly wants duplicate solving.
-- If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then run ctfctl interactive next again.
+- If stuck, update memory/evidence/attempts/next_steps, run ctfctl interactive stalled with a compact reason, then continue with solve-loop or ctfctl interactive next again.
 - Maintain memory.md, evidence.md, attempts.md, next_steps.md, and operator_notes.md for each challenge using ctfctl interactive memo.
 
 Submission and writeups:
@@ -1489,7 +1907,7 @@ Submission and writeups:
 
 After each challenge:
 - Run safe cleanup with ctfctl interactive cleanup --safe.
-- Claim the next eligible challenge and continue.
+- Claim or solve-loop the next eligible challenge and continue. Never stop after one problem unless the user stops you or no useful targets remain.
 """
     return {"status": "ok", "contest_id": contest_id, "agent": agent, "prompt": text}
 
@@ -3585,6 +4003,375 @@ def _append_starter_memos(challenge_dir: Path, *, starter_path: Path, category: 
     _append_text(challenge_dir / "operator_notes.md", f"\n- starter_{verb}: {_display(starter_path)} ({category}, {timestamp})\n")
 
 
+def _resolve_attempt_invocation(
+    root: Path,
+    board: Mapping[str, Any],
+    item: Mapping[str, Any],
+    challenge_id: str,
+    challenge_dir: Path,
+    *,
+    command: str | None,
+    script: str | Path | None,
+) -> dict[str, Any]:
+    if command and script:
+        return {"status": "blocked", "reason": "command_and_script_are_mutually_exclusive"}
+    if command:
+        return {"status": "ok", "argv": str(command), "shell": True, "command_display": str(command), "script_path": None}
+    script_path = _resolve_attempt_script(root, board, item, challenge_id, challenge_dir, script)
+    if script_path is None:
+        return {"status": "blocked", "reason": "command_or_script_required"}
+    if not script_path.exists():
+        return {"status": "blocked", "reason": "script_not_found"}
+    argv = _script_argv(script_path)
+    return {
+        "status": "ok",
+        "argv": argv,
+        "shell": False,
+        "command_display": " ".join(shlex.quote(part) for part in argv),
+        "script_path": script_path,
+    }
+
+
+def _resolve_attempt_script(
+    root: Path,
+    board: Mapping[str, Any],
+    item: Mapping[str, Any],
+    challenge_id: str,
+    challenge_dir: Path,
+    script: str | Path | None,
+) -> Path | None:
+    if script:
+        path = Path(script).expanduser()
+        return path if path.is_absolute() else challenge_dir / path
+    metadata_sources = [
+        _operator_config(root).get("challenge_solver_metadata", {}),
+        board.get("solver_metadata", {}),
+    ]
+    keys = _challenge_keys(item) | {_normalize(challenge_id)}
+    for source in metadata_sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, metadata in source.items():
+            if _normalize(str(key)) not in keys or not isinstance(metadata, Mapping):
+                continue
+            raw = str(metadata.get("starter_path") or "")
+            if not raw:
+                continue
+            path = _undisplay_path(raw)
+            if path.exists():
+                return path
+    for name in ("solve.py", "solver.py", "exploit.py", "solve_web.py", "solve_rev.py", "solve_crypto.py", "solve_misc.py", "solve_ai_ml.py"):
+        path = challenge_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def _script_argv(path: Path) -> list[str]:
+    if path.suffix == ".py":
+        return [sys.executable, str(path)]
+    if path.suffix in {".sh", ".bash"}:
+        return ["bash", str(path)]
+    return [str(path)]
+
+
+def _process_output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _timestamp_filename(value: str) -> str:
+    safe = re.sub(r"[^0-9A-Za-z_.-]+", "-", value.replace("+00:00", "Z"))
+    return safe.strip("-") or hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _detect_attempt_candidates(
+    contest_id: str,
+    challenge_id: str,
+    *,
+    stdout: str,
+    stderr: str,
+    command: str,
+    attempt_path: Path,
+    timestamp: str,
+    policy: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for stream, text in (("stdout", stdout), ("stderr", stderr)):
+        for candidate in detect_flag_candidates(text, flag_regex=str(policy.get("flag_regex") or "") or None):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            context = {
+                "source": "solver_output",
+                "evidence_source": _display(attempt_path),
+                "derivation": "detected by interactive run-attempt",
+                "local_verified": True,
+            }
+            classification = classify_flag_confidence(candidate, context=context, policy=policy)
+            rows.append(
+                {
+                    "schema": "interactive_candidate_v1",
+                    "contest_id": contest_id,
+                    "challenge_id": challenge_id,
+                    "value": candidate,
+                    "flag_hash": str(classification.get("flag_hash") or hash_flag(candidate)),
+                    "length": len(candidate),
+                    "source": f"attempt_{stream}",
+                    "evidence_source": _display(attempt_path),
+                    "evidence_stream": stream,
+                    "command": command,
+                    "timestamp": timestamp,
+                    "status": "detected",
+                    "confidence": classification.get("confidence"),
+                    "fake_likely": bool(classification.get("fake_likely")),
+                    "matches_flag_regex": bool(classification.get("matches_flag_regex")),
+                }
+            )
+    return rows
+
+
+def _append_detected_candidates(challenge_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    path = _candidate_store_path(challenge_dir)
+    existing_hashes = {str(row.get("flag_hash") or "") for row in _read_jsonl(path)}
+    stored: list[dict[str, Any]] = []
+    for row in rows:
+        digest = str(row.get("flag_hash") or "")
+        if digest and digest in existing_hashes:
+            continue
+        _append_jsonl_raw(path, row)
+        existing_hashes.add(digest)
+        stored.append(row)
+    return stored
+
+
+def _candidate_store_path(challenge_dir: Path) -> Path:
+    return challenge_dir / "candidates.jsonl"
+
+
+def _coalesced_candidates(challenge_dir: Path) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in _read_jsonl(_candidate_store_path(challenge_dir)):
+        digest = str(row.get("flag_hash") or "")
+        if not digest:
+            value = str(row.get("value") or "")
+            digest = hash_flag(value) if value else hashlib.sha1(json.dumps(row, sort_keys=True).encode("utf-8")).hexdigest()
+        if digest not in latest:
+            order.append(digest)
+        latest[digest] = row
+    return [latest[digest] for digest in order]
+
+
+def _candidate_local_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "value": row.get("value", ""),
+        "flag_hash": row.get("flag_hash", ""),
+        "length": row.get("length", len(str(row.get("value") or ""))),
+        "source": row.get("source", ""),
+        "evidence_source": row.get("evidence_source", ""),
+        "command": row.get("command", ""),
+        "timestamp": row.get("timestamp", ""),
+        "status": row.get("status", ""),
+        "confidence": row.get("confidence", ""),
+        "fake_likely": bool(row.get("fake_likely")),
+        "duplicate": bool(row.get("duplicate")),
+    }
+
+
+def _candidate_public_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "challenge_id": str(row.get("challenge_id") or ""),
+        "flag_hash": str(row.get("flag_hash") or ""),
+        "length": _int_value(row.get("length")) or len(str(row.get("value") or "")),
+        "source": _safe_public_note(str(row.get("source") or ""), limit=80),
+        "status": _safe_public_note(str(row.get("status") or ""), limit=80),
+        "confidence": _safe_public_note(str(row.get("confidence") or ""), limit=40),
+        "timestamp": str(row.get("timestamp") or ""),
+    }
+
+
+def _select_candidate_for_verification(
+    challenge_dir: Path,
+    *,
+    candidate: str | None,
+    candidate_file: str | Path | None,
+) -> dict[str, Any]:
+    if candidate is not None:
+        value = str(candidate).strip()
+        digest = hash_flag(value) if value else ""
+        for row in _coalesced_candidates(challenge_dir):
+            if str(row.get("flag_hash") or "") == digest:
+                return dict(row)
+        return {"value": value, "source": "manual_candidate"}
+    if candidate_file:
+        path = Path(candidate_file).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return {}
+        detected = detect_flag_candidates(text)
+        return {
+            "value": detected[0] if detected else text,
+            "source": "candidate_file",
+            "evidence_source": _display(path),
+            "derivation": "read from candidate file",
+            "local_verified": True,
+        }
+    rows = _coalesced_candidates(challenge_dir)
+    if not rows:
+        return {}
+    return dict(rows[-1])
+
+
+def _verification_context(selected: Mapping[str, Any]) -> dict[str, Any]:
+    source = str(selected.get("source") or "manual_candidate")
+    if source.startswith("attempt_"):
+        context_source = "solver_output"
+    elif source == "candidate_file":
+        context_source = "known_flag_source"
+    else:
+        context_source = source
+    return {
+        "source": context_source,
+        "evidence_source": selected.get("evidence_source") or selected.get("path") or "",
+        "derivation": selected.get("derivation") or ("detected by interactive run-attempt" if source.startswith("attempt_") else ""),
+        "local_verified": bool(selected.get("local_verified") or source.startswith("attempt_") or source == "candidate_file"),
+        "confidence": selected.get("confidence") or "",
+    }
+
+
+def _verification_status(
+    confidence: str,
+    decision: Mapping[str, Any],
+    classification: Mapping[str, Any],
+    duplicate: bool,
+) -> str:
+    if duplicate:
+        return "duplicate"
+    if bool(classification.get("fake_likely")):
+        return "fake_like"
+    if not bool(classification.get("matches_flag_regex")):
+        return "invalid_format"
+    if decision.get("allowed"):
+        return f"verified_{confidence or 'unknown'}"
+    return f"blocked_{decision.get('reason') or confidence or 'unknown'}"
+
+
+def _append_attempt_markdown(challenge_dir: Path, attempt: Mapping[str, Any], attempt_path: Path, candidates: list[dict[str, Any]]) -> None:
+    safe_command = redact_text(str(attempt.get("command") or "")).replace("`", "")
+    lines = [
+        f"\n## Attempt {attempt.get('completed_at') or utc_now()}",
+        "",
+        f"- command: `{safe_command}`",
+        f"- agent: {redact_text(str(attempt.get('agent') or ''))}",
+        f"- returncode: {attempt.get('returncode')}",
+        f"- timed_out: {bool(attempt.get('timed_out'))}",
+        f"- runtime_sec: {attempt.get('runtime_sec')}",
+        f"- stdout_len: {attempt.get('stdout_len')}",
+        f"- stderr_len: {attempt.get('stderr_len')}",
+        f"- record: {_display(attempt_path)}",
+    ]
+    if candidates:
+        lines.append("- candidates:")
+        for row in candidates:
+            lines.append(f"  - hash={row.get('flag_hash')} length={row.get('length')} source={row.get('source')} confidence={row.get('confidence')}")
+    else:
+        lines.append("- candidates: none")
+    _append_text(challenge_dir / "attempts.md", "\n".join(lines) + "\n")
+
+
+def _append_attempt_evidence(challenge_dir: Path, attempt: Mapping[str, Any], attempt_path: Path, candidates: list[dict[str, Any]]) -> None:
+    if candidates:
+        lines = [f"\n## Candidate Detection {attempt.get('completed_at') or utc_now()}", "", f"- attempt: {_display(attempt_path)}"]
+        for row in candidates:
+            lines.append(f"- candidate_sha256: {row.get('flag_hash')} length={row.get('length')} source={row.get('source')} confidence={row.get('confidence')}")
+        _append_text(challenge_dir / "evidence.md", "\n".join(lines) + "\n")
+    else:
+        _append_text(challenge_dir / "evidence.md", f"\n- attempt {attempt.get('completed_at') or utc_now()}: no flag-like candidate detected ({_display(attempt_path)})\n")
+
+
+def _append_candidate_verification_evidence(challenge_dir: Path, record: Mapping[str, Any]) -> None:
+    _append_text(
+        challenge_dir / "evidence.md",
+        (
+            f"\n## Candidate Verification {record.get('timestamp') or utc_now()}\n\n"
+            f"- candidate_sha256: {record.get('flag_hash')}\n"
+            f"- length: {record.get('length')}\n"
+            f"- confidence: {record.get('confidence')}\n"
+            f"- status: {record.get('status')}\n"
+            f"- source: {record.get('source')}\n"
+        ),
+    )
+
+
+def _solve_loop_submit_plan(contest_id: str, challenge_id: str, verification: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "ready",
+        "contest_id": contest_id,
+        "challenge_id": challenge_id,
+        "candidate_hash": verification.get("candidate_hash"),
+        "confidence": verification.get("confidence"),
+        "command": "ctfctl interactive submit --contest-id <contest> --challenge-id <challenge> --flag-file <local-file> --confirm --json",
+        "confirm_required": True,
+    }
+
+
+def _submit_candidate_value(contest_id: str, challenge_id: str, candidate: str, *, challenge_dir: Path) -> dict[str, Any]:
+    attempt_dir = challenge_dir / "attempts"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    flag_path = attempt_dir / f"submit-candidate-{hash_flag(candidate)[:12]}.txt"
+    flag_path.write_text(candidate, encoding="utf-8")
+    try:
+        return submit_flag_file(contest_id, challenge_id=challenge_id, flag_file=flag_path, confirm=True)
+    finally:
+        flag_path.unlink(missing_ok=True)
+
+
+def _write_solve_loop_summary(
+    challenge_dir: Path,
+    *,
+    contest_id: str,
+    challenge_id: str,
+    category: str,
+    verification: Mapping[str, Any],
+    submit_result: Mapping[str, Any],
+) -> None:
+    digest = str(verification.get("candidate_hash") or submit_result.get("flag_hash") or "")
+    timestamp = utc_now()
+    summary = [
+        "# Solve Summary",
+        "",
+        f"- contest_id: {contest_id}",
+        f"- challenge_id: {challenge_id}",
+        f"- category: {category}",
+        "- status: accepted",
+        f"- accepted_flag_hash: {digest}",
+        f"- solved_at: {timestamp}",
+        f"- candidate_confidence: {verification.get('confidence')}",
+        "",
+    ]
+    skill = [
+        "# Skill Candidate",
+        "",
+        f"- contest_id: {contest_id}",
+        f"- challenge_id: {challenge_id}",
+        f"- category: {category}",
+        "- pattern: interactive solve-loop produced and verified a high-confidence local candidate",
+        "- reusable_signal: starter execution plus automatic candidate extraction and guarded submit",
+        f"- accepted_flag_hash: {digest}",
+        "",
+    ]
+    (challenge_dir / "solve_summary.md").write_text(_target_safe_text("\n".join(summary)), encoding="utf-8")
+    (challenge_dir / "skill_candidate.md").write_text(_target_safe_text("\n".join(skill)), encoding="utf-8")
+
+
 def _save_challenge_triage_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
     _save_challenge_local_metadata(root, board, challenge_id, "challenge_triage_metadata", "triage_metadata", metadata)
 
@@ -4536,6 +5323,7 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "total_events": len(contest_events),
         "sessions": len(sessions),
         "claimed_count": sum(1 for row in contest_events if row.get("event") == "claim"),
+        "attempt_count": sum(1 for row in contest_events if row.get("event") == "attempt_completed"),
         "solved_count": solved_count,
         "stalled_count": sum(1 for row in contest_events if row.get("event") == "stalled"),
         "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit") + artifact_attempted_count,
@@ -4616,7 +5404,7 @@ def _attempts_total(events: list[dict[str, Any]]) -> int | None:
     for row in events:
         event = str(row.get("event") or "")
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
-        if event in {"attempt", "attempts"}:
+        if event in {"attempt", "attempts", "attempt_completed"}:
             total += 1
             seen = True
         value = data.get("attempts_total") or data.get("attempt_count")
@@ -4624,6 +5412,27 @@ def _attempts_total(events: list[dict[str, Any]]) -> int | None:
             total += int(value)
             seen = True
     return total if seen else None
+
+
+def _public_candidates(root: Path, board: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    contest_id = str(board.get("contest_id") or "")
+    for item in board.get("challenges", []):
+        if not isinstance(item, Mapping):
+            continue
+        challenge_id = str(item.get("challenge_id") or item.get("name") or "")
+        if not challenge_id:
+            continue
+        challenge_dir = _challenge_path(contest_id, item)
+        for row in _coalesced_candidates(challenge_dir):
+            public = _candidate_public_payload({**row, "challenge_id": challenge_id})
+            key = (str(public.get("challenge_id") or ""), str(public.get("flag_hash") or ""))
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            rows.append(public)
+    return rows
 
 
 def _public_artifact_submissions(root: Path, contest_id: str) -> list[dict[str, Any]]:
@@ -4985,10 +5794,22 @@ def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.write_text(redact_text(json.dumps(data, indent=2, sort_keys=True)) + "\n", encoding="utf-8")
 
 
+def _write_json_raw(path: Path, data: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+
 def _append_jsonl(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(redact_text(json.dumps(_redact_object(dict(data)), sort_keys=True)))
+        fh.write("\n")
+
+
+def _append_jsonl_raw(path: Path, data: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(dict(data), sort_keys=True, default=str))
         fh.write("\n")
 
 

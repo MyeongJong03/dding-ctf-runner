@@ -77,9 +77,13 @@ Each Codex terminal should keep going until the contest ends, the operator stops
 ```bash
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --json
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script <path> --json
+ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind memory --append "short fact" --json
 ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
@@ -91,13 +95,17 @@ ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
 ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 ```
 
-`interactive prepare-target` is the preferred solver starter. With no `--challenge-id`, it runs `next`, generates the target pack, runs local-only category triage, creates a category starter file, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`.
+`interactive solve-loop` is the preferred automation harness after target setup. It ensures `prepare-target`, executes the starter as a structured attempt, records stdout/stderr/returncode/runtime under `attempts/`, extracts local flag-like candidates into `candidates.jsonl`, verifies confidence and duplicate/wrong guards, and submits only high-confidence candidates through the guarded interactive submit path. Accepted solves continue to ko/en writeup, safe cleanup, and metrics summary; exhausted attempts mark the challenge stalled without creating a writeup.
+
+`interactive prepare-target` is the preferred manual solver starter. With no `--challenge-id`, it runs `next`, generates the target pack, runs local-only category triage, creates a category starter file, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`.
 
 `interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear stalled `next_steps` raise priority; alias/static rows, generic no-file statements, solved, and externally solved challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
 
 `interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 
 `interactive triage` reads only local challenge artifacts, briefs, manifests, and memos. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `interactive starter` creates `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, `solve_misc.py`, or `solve_ai_ml.py` and records the starter path in operator/board metadata. Neither command creates writeups.
+
+For manual experiments, use `run-attempt -> candidates -> verify-candidate`. Attempt JSON stores raw local stdout/stderr and raw candidates for solving. Public-safe metrics snapshots include only candidate hash, length, source, status, confidence, and timestamp.
 
 When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, or alias:
 
@@ -145,8 +153,9 @@ GitHub-managed metrics must be public-safe snapshots only:
 - Do not upload contest flags, writeups, exploit bodies, auth material, or private artifacts during an active contest.
 - Unsolved challenges get stalled metrics with high-level blockers and next steps, not writeups.
 - Artifact upload public snapshots may include artifact SHA-256, size, and status only; they must not include auth, paths, raw responses, or private artifact contents.
+- Candidate public snapshots may include candidate hash, length, source, status, confidence, and timestamp only; they must not include raw candidate values.
 - After an accepted solve, run submit -> ko/en writeup -> cleanup -> metrics update -> next challenge.
-- After a stall, record memo/attempts/next_steps -> metrics update -> next challenge.
+- After a stall, record memo/attempts/next_steps -> stalled metrics update -> next challenge.
 - At contest end, run `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended`, then `ctfctl interactive metrics dashboard`, then optionally commit the generated public-safe files.
 - During a contest, `publish-snapshot` is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided.
 

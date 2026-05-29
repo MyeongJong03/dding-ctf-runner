@@ -228,6 +228,10 @@ def run_public_check(
         "interactive_triage": "./scripts/ctfctl interactive triage --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",
         "interactive_starter": "./scripts/ctfctl interactive starter --contest-id release-interactive-smoke --challenge-id <id> --json",
         "interactive_prepare_target": "./scripts/ctfctl interactive prepare-target --contest-id release-interactive-smoke --agent smoke-1 --challenge-id <id> --json",
+        "interactive_run_attempt": "./scripts/ctfctl interactive run-attempt --contest-id release-interactive-smoke --challenge-id <id> --script <path> --json",
+        "interactive_candidates": "./scripts/ctfctl interactive candidates --contest-id release-interactive-smoke --challenge-id <id> --json",
+        "interactive_verify_candidate": "./scripts/ctfctl interactive verify-candidate --contest-id release-interactive-smoke --challenge-id <id> --candidate-file <path> --json",
+        "interactive_solve_loop": "./scripts/ctfctl interactive solve-loop --contest-id release-interactive-smoke --agent smoke-1 --challenge-id <id> --json",
         "interactive_brief": "./scripts/ctfctl interactive brief --contest-id release-interactive-smoke --challenge-id <id> --json",
     }
     legacy_advanced_test_commands = {

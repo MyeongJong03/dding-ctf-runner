@@ -348,6 +348,181 @@ def test_interactive_prepare_target_without_challenge_claims_next(tmp_path: Path
     assert Path(result["starter_path"].replace("~", str(Path.home()), 1)).exists()
 
 
+def test_run_attempt_records_stdout_stderr_returncode_and_candidate(tmp_path: Path, monkeypatch):
+    _seed_solve_harness_board(tmp_path, monkeypatch, contest_id="attempt-demo")
+    challenge = tmp_path / "contests" / "attempt-demo" / "misc" / "Auto"
+    raw_candidate = "FLAG{unit_attempt_candidate}"
+    solver = challenge / "solver.py"
+    solver.write_text(
+        "import sys\n"
+        f"print({raw_candidate!r})\n"
+        "print('debug stderr', file=sys.stderr)\n",
+        encoding="utf-8",
+    )
+
+    result, output = _run_json_with_output(
+        [
+            "interactive",
+            "run-attempt",
+            "--contest-id",
+            "attempt-demo",
+            "--challenge-id",
+            "auto",
+            "--script",
+            "solver.py",
+            "--timeout",
+            "10",
+            "--json",
+        ]
+    )
+
+    root = tmp_path / "contests" / "attempt-demo" / "operator"
+    attempt_path = Path(result["attempt_path"])
+    attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
+    candidate_store = (challenge / "candidates.jsonl").read_text(encoding="utf-8")
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert result["returncode"] == 0
+    assert raw_candidate in result["stdout"]
+    assert "debug stderr" in result["stderr"]
+    assert raw_candidate in output
+    assert attempt["stdout"].strip() == raw_candidate
+    assert attempt["stderr"].strip() == "debug stderr"
+    assert attempt["returncode"] == 0
+    assert raw_candidate in candidate_store
+    assert "attempt_started" in events
+    assert "attempt_completed" in events
+    assert "Attempt" in (challenge / "attempts.md").read_text(encoding="utf-8")
+
+
+def test_candidates_lists_local_raw_and_verify_marks_high_confidence(tmp_path: Path, monkeypatch):
+    _seed_solve_harness_board(tmp_path, monkeypatch, contest_id="candidate-demo")
+    challenge = tmp_path / "contests" / "candidate-demo" / "misc" / "Auto"
+    raw_candidate = "FLAG{unit_verified_candidate}"
+    (challenge / "solver.py").write_text(f"print({raw_candidate!r})\n", encoding="utf-8")
+
+    _run_json(
+        [
+            "interactive",
+            "run-attempt",
+            "--contest-id",
+            "candidate-demo",
+            "--challenge-id",
+            "auto",
+            "--script",
+            "solver.py",
+            "--json",
+        ]
+    )
+    listed = _run_json(["interactive", "candidates", "--contest-id", "candidate-demo", "--challenge-id", "auto", "--json"])
+    verified = _run_json(["interactive", "verify-candidate", "--contest-id", "candidate-demo", "--challenge-id", "auto", "--json"])
+
+    assert listed["count"] == 1
+    assert listed["candidates"][0]["value"] == raw_candidate
+    assert verified["candidate"] == raw_candidate
+    assert verified["confidence"] == "high"
+    assert verified["verification_status"] == "verified_high"
+    assert verified["submit_allowed"] is True
+
+
+def test_public_snapshot_excludes_raw_local_candidate(tmp_path: Path, monkeypatch):
+    _seed_solve_harness_board(tmp_path, monkeypatch, contest_id="public-candidate-demo")
+    challenge = tmp_path / "contests" / "public-candidate-demo" / "misc" / "Auto"
+    raw_candidate = "FLAG{unit_public_snapshot_candidate}"
+    (challenge / "solver.py").write_text(f"print({raw_candidate!r})\n", encoding="utf-8")
+
+    _run_json(["interactive", "run-attempt", "--contest-id", "public-candidate-demo", "--challenge-id", "auto", "--script", "solver.py", "--json"])
+    assert raw_candidate in (challenge / "candidates.jsonl").read_text(encoding="utf-8")
+
+    snapshot_root = tmp_path / "public" / "candidate-demo"
+    snapshot = _run_json(
+        [
+            "interactive",
+            "metrics",
+            "publish-snapshot",
+            "--contest-id",
+            "public-candidate-demo",
+            "--output-root",
+            str(snapshot_root),
+            "--contest-ended",
+            "--json",
+        ]
+    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in snapshot_root.glob("*.public.*"))
+
+    assert snapshot["public_safe"] is True
+    assert raw_candidate not in combined
+    assert "unit_public_snapshot_candidate" not in combined
+    assert "flag_hash" in combined
+    assert "attempt_stdout" in combined
+
+
+def test_solve_loop_fake_accepted_creates_writeups_cleanup_and_metrics(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "profile.yaml"
+    _seed_solve_harness_board(tmp_path, monkeypatch, contest_id="solve-loop-demo", profile=profile)
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeAcceptedPlatform())
+    challenge = tmp_path / "contests" / "solve-loop-demo" / "misc" / "Auto"
+    raw_candidate = "FLAG{unit_solve_loop_value}"
+    (challenge / "solve_misc.py").write_text(f"print({raw_candidate!r})\n", encoding="utf-8")
+
+    result = _run_json(
+        [
+            "interactive",
+            "solve-loop",
+            "--contest-id",
+            "solve-loop-demo",
+            "--agent",
+            "a1",
+            "--challenge-id",
+            "auto",
+            "--max-attempts",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert result["status"] == "solved"
+    assert result["submit"]["status"] == "accepted"
+    assert result["metrics_summary"]["attempt_count"] == 1
+    assert result["metrics_summary"]["accepted_count"] == 1
+    assert result["metrics_summary"]["writeup_ko_count"] == 1
+    assert result["metrics_summary"]["writeup_en_count"] == 1
+    assert result["metrics_summary"]["cleanup_count"] == 1
+    assert Path(result["writeup"]["files"]["ko"]).exists()
+    assert Path(result["writeup"]["files"]["en"]).exists()
+    assert (challenge / "solve_summary.md").exists()
+    assert (challenge / "skill_candidate.md").exists()
+    assert raw_candidate in (challenge / "candidates.jsonl").read_text(encoding="utf-8")
+
+
+def test_solve_loop_failing_fixture_stalls_without_writeup(tmp_path: Path, monkeypatch):
+    _seed_solve_harness_board(tmp_path, monkeypatch, contest_id="solve-loop-fail")
+    challenge = tmp_path / "contests" / "solve-loop-fail" / "misc" / "Auto"
+    (challenge / "solve_misc.py").write_text("print('no candidate yet')\nraise SystemExit(1)\n", encoding="utf-8")
+
+    result = _run_json(
+        [
+            "interactive",
+            "solve-loop",
+            "--contest-id",
+            "solve-loop-fail",
+            "--agent",
+            "a1",
+            "--challenge-id",
+            "auto",
+            "--max-attempts",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert result["status"] == "stalled"
+    assert result["metrics_summary"]["attempt_count"] == 1
+    assert result["metrics_summary"]["stalled_count"] == 1
+    assert not list((tmp_path / "contests" / "solve-loop-fail" / "operator" / "writeups").glob("*Writeup.*.md"))
+
+
 def test_interactive_starter_generation_smoke_web_pwn_crypto(tmp_path: Path, monkeypatch):
     for category, expected in [("web", "solve_web.py"), ("pwn", "exploit.py"), ("crypto", "solve_crypto.py")]:
         contest_id = f"starter-{category}"
@@ -1200,6 +1375,45 @@ def _seed_category_starter_board(tmp_path: Path, monkeypatch, *, contest_id: str
                         "canonical_name": "Demo",
                         "category": category,
                         "statement": f"{category} local starter smoke.",
+                        "status": "todo",
+                        "priority": 100,
+                        "has_files": True,
+                        "file_count": 1,
+                        "claimable": True,
+                        "path": str(challenge),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_solve_harness_board(tmp_path: Path, monkeypatch, *, contest_id: str, profile: Path | None = None) -> None:
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    args = ["interactive", "init", "--contest-id", contest_id, "--json"]
+    if profile:
+        profile.write_text("name: demo\n", encoding="utf-8")
+        args.extend(["--profile", str(profile)])
+    _run_json(args)
+    root = tmp_path / "contests" / contest_id
+    challenge = root / "misc" / "Auto"
+    raw = challenge / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    (raw / "notes.txt").write_text("local solve harness fixture\n", encoding="utf-8")
+    (challenge / "brief.md").write_text("# Brief\nRun the local starter and submit the verified candidate.\n", encoding="utf-8")
+    (root / "operator" / "board.json").write_text(
+        json.dumps(
+            {
+                "contest_id": contest_id,
+                "challenges": [
+                    {
+                        "challenge_id": "auto",
+                        "name": "Auto",
+                        "canonical_id": "auto",
+                        "canonical_name": "Auto",
+                        "category": "misc",
+                        "statement": "Local solve harness fixture.",
                         "status": "todo",
                         "priority": 100,
                         "has_files": True,

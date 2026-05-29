@@ -63,6 +63,7 @@ from .interactive import (
     cleanup_challenge as interactive_cleanup_challenge,
     e2e_smoke as interactive_e2e_smoke,
     init_operator as interactive_init_operator,
+    list_candidates as interactive_list_candidates,
     mark_external_solved as interactive_mark_external_solved,
     mark_stalled as interactive_mark_stalled,
     metrics_baseline as interactive_metrics_baseline,
@@ -77,6 +78,8 @@ from .interactive import (
     next_challenge as interactive_next_challenge,
     prepare_target as interactive_prepare_target,
     release_claim as interactive_release_claim,
+    run_attempt as interactive_run_attempt,
+    solve_loop as interactive_solve_loop,
     solver_prompt as interactive_solver_prompt,
     starter_challenge as interactive_starter_challenge,
     submit_config as interactive_submit_config,
@@ -85,6 +88,7 @@ from .interactive import (
     target_pack as interactive_target_pack,
     triage_challenge as interactive_triage_challenge,
     upload_submit as interactive_upload_submit,
+    verify_candidate as interactive_verify_candidate,
     writeup_challenge as interactive_writeup_challenge,
 )
 from .multi_worker import run_local_e2e, run_parallel_smoke, worker_status
@@ -140,6 +144,10 @@ from .worker_supervisor import (
 
 def _print_json(data: Any) -> None:
     print(redact_text(json.dumps(data, indent=2, sort_keys=True)))
+
+
+def _print_local_json(data: Any) -> None:
+    print(json.dumps(data, indent=2, sort_keys=True))
 
 
 def _print_public_json(data: Any, *, show_public_url: bool = False) -> None:
@@ -400,6 +408,47 @@ def _cmd_interactive_prepare_target(args: argparse.Namespace) -> int:
     data = interactive_prepare_target(args.contest_id, agent=args.agent, challenge_id=args.challenge_id)
     _print_json(data)
     return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_run_attempt(args: argparse.Namespace) -> int:
+    data = interactive_run_attempt(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        agent=args.agent,
+        command=args.command,
+        script=args.script,
+        timeout=args.timeout,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_candidates(args: argparse.Namespace) -> int:
+    data = interactive_list_candidates(args.contest_id, challenge_id=args.challenge_id)
+    _print_local_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_verify_candidate(args: argparse.Namespace) -> int:
+    data = interactive_verify_candidate(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        candidate=args.candidate,
+        candidate_file=args.candidate_file,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_solve_loop(args: argparse.Namespace) -> int:
+    data = interactive_solve_loop(
+        args.contest_id,
+        agent=args.agent,
+        challenge_id=args.challenge_id,
+        max_attempts=args.max_attempts,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") in {"solved", "stalled", "submit_planned"} else 1
 
 
 def _cmd_interactive_brief(args: argparse.Namespace) -> int:
@@ -2191,6 +2240,34 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prepare_target.add_argument("--challenge-id")
     interactive_prepare_target.add_argument("--json", action="store_true")
     interactive_prepare_target.set_defaults(func=_cmd_interactive_prepare_target)
+    interactive_run_attempt = interactive_sub.add_parser("run-attempt")
+    interactive_run_attempt.add_argument("--contest-id", required=True)
+    interactive_run_attempt.add_argument("--challenge-id", required=True)
+    interactive_run_attempt.add_argument("--agent")
+    interactive_run_attempt.add_argument("--command")
+    interactive_run_attempt.add_argument("--script")
+    interactive_run_attempt.add_argument("--timeout", type=int, default=120)
+    interactive_run_attempt.add_argument("--json", action="store_true")
+    interactive_run_attempt.set_defaults(func=_cmd_interactive_run_attempt)
+    interactive_candidates = interactive_sub.add_parser("candidates")
+    interactive_candidates.add_argument("--contest-id", required=True)
+    interactive_candidates.add_argument("--challenge-id", required=True)
+    interactive_candidates.add_argument("--json", action="store_true")
+    interactive_candidates.set_defaults(func=_cmd_interactive_candidates)
+    interactive_verify_candidate = interactive_sub.add_parser("verify-candidate")
+    interactive_verify_candidate.add_argument("--contest-id", required=True)
+    interactive_verify_candidate.add_argument("--challenge-id", required=True)
+    interactive_verify_candidate.add_argument("--candidate")
+    interactive_verify_candidate.add_argument("--candidate-file")
+    interactive_verify_candidate.add_argument("--json", action="store_true")
+    interactive_verify_candidate.set_defaults(func=_cmd_interactive_verify_candidate)
+    interactive_solve_loop = interactive_sub.add_parser("solve-loop")
+    interactive_solve_loop.add_argument("--contest-id", required=True)
+    interactive_solve_loop.add_argument("--agent", required=True)
+    interactive_solve_loop.add_argument("--challenge-id")
+    interactive_solve_loop.add_argument("--max-attempts", type=int, default=5)
+    interactive_solve_loop.add_argument("--json", action="store_true")
+    interactive_solve_loop.set_defaults(func=_cmd_interactive_solve_loop)
     interactive_brief = interactive_sub.add_parser("brief")
     interactive_brief.add_argument("--contest-id", required=True)
     interactive_brief.add_argument("--challenge-id", required=True)

@@ -59,15 +59,22 @@ Board sync is canonical-first. Alias/static shell rows stay in `board.json` unde
 Pick or prepare the next target:
 
 ```bash
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
+ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --max-attempts 5 --json
 ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script <path> --json
+ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ```
 
-`prepare-target` is the default Codex starter: it runs `next` when needed, generates the target pack, runs local-only category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. `next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or stalled `next_steps`. It skips alias/static rows and solved/external-solved work. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos. `starter` creates the category solve skeleton and records it in board/operator metadata. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
+`solve-loop` is the default Codex harness after prompt startup: it selects or prepares a target, ensures target pack/triage/starter, runs the starter as a structured attempt, extracts local candidates, verifies confidence and submit guards, submits high-confidence candidates, then writes ko/en writeups, runs cleanup, updates metrics, and continues. If it exhausts `--max-attempts`, it updates attempts/next steps, records stalled metrics, creates no writeup, and continues to the next challenge.
+
+`prepare-target` is the manual Codex starter: it runs `next` when needed, generates the target pack, runs local-only category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. `next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or stalled `next_steps`. It skips alias/static rows and solved/external-solved work. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos. `starter` creates the category solve skeleton and records it in board/operator metadata. `run-attempt` records raw local stdout/stderr/returncode/runtime in `attempts/`, updates `attempts.md`, extracts candidates into `candidates.jsonl`, and emits attempt metrics. `candidates` displays local raw candidate values; public snapshots include only candidate hash, length, source, status, confidence, and timestamp. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
 
 Add operator information:
 
@@ -171,7 +178,7 @@ GitHub metrics are public-safe snapshots only. Do not upload contest writeups, f
 Use this operational order:
 
 - Accepted solve: submit -> writeup ko/en -> cleanup -> metrics update -> next challenge.
-- Stalled challenge: memo/attempts/next_steps -> metrics update -> next challenge.
+- Stalled challenge: attempts/next_steps -> stalled metrics update -> next challenge.
 - Contest end: `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json` -> `ctfctl interactive metrics dashboard --json` -> optional git commit.
 
 `publish-snapshot` is blocked during a contest unless both `--allow-active-contest` and `--confirm-public-safe` are explicitly set.
