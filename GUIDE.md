@@ -210,7 +210,7 @@ Generate or refresh the solver launch pack:
 ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ```
 
-The pack is written under `operator/target-packs/` and includes canonical name, aliases, artifact sources, real challenge/brief/raw/extracted paths, remote connection info, top interesting files, current memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, a category playbook, stall criteria, and accepted-only writeup/cleanup reminders. It does not include raw auth material, cookies, tokens, sessions, browser storage, or private keys.
+The pack is written under `operator/target-packs/` and includes canonical name, aliases, artifact sources, real challenge/brief/raw/extracted paths, web metadata, remote connection info, top interesting files, current memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, a category playbook, stall criteria, and accepted-only writeup/cleanup reminders. It does not include raw auth material, cookies, tokens, sessions, browser storage, or private keys.
 
 Run local auto-triage and create a starter explicitly:
 
@@ -219,7 +219,7 @@ ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category <category> --json
 ```
 
-`triage` never connects to external CTF services. It reads local raw/handout/extracted files, `brief.md`, manifests, and memos, then writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`. It updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `starter` creates a category-specific skeleton such as `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, or `solve_misc.py`, and records the path in board/operator metadata. These commands do not create writeups; writeups remain accepted-only.
+`triage` reads local raw/handout/extracted files, `brief.md`, manifests, and memos, then writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`. For web challenges with configured `base_url`, it also runs the bounded `web-probe` harness and records only summarized page structure, not raw bodies. It updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `starter` creates a category-specific skeleton such as `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, or `solve_misc.py`, and records the path in board/operator metadata. The web starter uses a `requests.Session`/urllib skeleton plus an optional Playwright hook for DOM-only bugs. These commands do not create writeups; writeups remain accepted-only.
 
 Run and verify manual experiments:
 
@@ -231,6 +231,26 @@ ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <i
 ```
 
 `run-attempt` executes from the challenge directory and stores raw local stdout/stderr/returncode/runtime in `attempts/`. It appends compact attempt/evidence notes and records `attempt_started`/`attempt_completed` metrics. Raw candidates are allowed in local terminal output and `candidates.jsonl`; public-safe snapshots use only hash, length, source, status, confidence, and timestamp.
+
+Web/browser workflow:
+
+```bash
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source none --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source cookie-file --cookie-file <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source header-file --header-file <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source storage-state --storage-state <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source env --auth-env <name> --json
+ctfctl interactive web-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 20 --json
+ctfctl interactive browser-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 30 --json
+ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_web.py --timeout 60 --json
+ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --request-json request.json --json
+ctfctl interactive browser-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_browser.py --timeout 90 --json
+ctfctl interactive web-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+`web-config` records challenge web metadata in board/operator state. It stores `base_url`, base URL source, auth source type, file paths, or environment variable names only; raw cookie/header/storage-state/env values are never stored or printed. Base URLs must be HTTP/HTTPS without embedded credentials or secret-bearing query keys; profile-origin differences are reported as warnings because challenge hosts can differ from the scoreboard host. `web-probe` performs a bounded GET with the configured auth source and stores title, forms, links, scripts, static-link path/hash summaries, endpoint candidates, and response header summaries in `web/probes/<timestamp>.json`; raw response bodies are not stored. `browser-probe` loads the page with Playwright when available, stores screenshot path, page title, console summary, network method/path/status/content-type summary, and blocked destructive request summaries in `web/browser_probes/<timestamp>.json`. If Playwright is unavailable, it reports `unavailable` rather than requiring external browser setup.
+
+`web-attempt` runs a local script or JSON request spec from the challenge directory. Scripts receive `CTF_WEB_BASE_URL`, `CTF_WEB_AUTH_SOURCE`, and source metadata such as `CTF_WEB_COOKIE_FILE`, `CTF_WEB_HEADER_FILE`, `CTF_WEB_STORAGE_STATE`, or `CTF_WEB_AUTH_ENV`; they do not receive raw cookie/header/storage values from the harness. Request specs may define method/path/url/body/json and are executed against the configured base URL with configured auth headers. `browser-attempt` runs a Playwright-capable local script with `CTF_BROWSER_ARTIFACT_DIR`, `CTF_BROWSER_SCREENSHOT`, `CTF_BROWSER_CONSOLE_JSONL`, and `CTF_BROWSER_NETWORK_JSONL`, then records screenshot/console/network summaries. Local raw flags and solver output are allowed in terminal output and local attempt records; public-safe metrics exclude raw responses, cookies, headers, storage state, and raw candidate values.
 
 Remote service workflow:
 

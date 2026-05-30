@@ -90,6 +90,12 @@ ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category web --json
 ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 120 --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source none --json
+ctfctl interactive web-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 20 --json
+ctfctl interactive browser-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 30 --json
+ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_web.py --timeout 60 --json
+ctfctl interactive browser-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_browser.py --timeout 90 --json
+ctfctl interactive web-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --plain --token-source none --json
 ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 10 --json
 ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 60 --json
@@ -129,6 +135,7 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 - canonical name, canonical ID, aliases, artifact sources, and source IDs
 - category guess and confidence
 - challenge path, brief path, raw/handout directories, extracted directories, and manifest paths
+- normalized web metadata with base URL, auth-source metadata, warning count, and recommended web probe/browser/attempt commands
 - remote connection info detected from board metadata or brief text
 - normalized remote service metadata with host, port, TLS/plain/auto transport, token-source metadata, optional PoW helper, and recommended probe/attempt commands
 - top interesting files from ingest manifests or local artifact fallback
@@ -138,11 +145,34 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 
 Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving; public upload, public writeup, public paste, and git push of flags or private artifacts remain forbidden during the contest.
 
-`interactive triage` reads only local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. Missing tools are skipped or replaced with an available fallback before being recommended as first commands. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started`, `fallback_selected`, and `triage_completed` metrics.
+`interactive triage` reads local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. For web targets with configured base URL it also runs the bounded `web-probe` harness, saving title/form/link/script/endpoint summaries without raw response bodies. Missing tools are skipped or replaced with an available fallback before being recommended as first commands. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started`, `web_probe_completed` when applicable, `fallback_selected`, and `triage_completed` metrics.
 
-`interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with requests/urllib fallback, `exploit.py` with optional pwntools plus socket/subprocess fallback, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
+`interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with requests.Session/urllib fallback and optional Playwright screenshot hook, `exploit.py` with optional pwntools plus socket/subprocess fallback, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
 
 `interactive run-attempt` executes `--command` or `--script` from the challenge directory. It stores raw local stdout/stderr/returncode/runtime in `attempts/<timestamp>.json`, appends compact entries to `attempts.md` and `evidence.md`, records `attempt_started` and `attempt_completed` metrics, and extracts flag-like candidates into `candidates.jsonl`. `interactive candidates` lists the local candidate store with raw values for local solving. `interactive verify-candidate` reads a passed value, candidate file, or latest local candidate, then checks format, duplicate hash, fake-like markers, previous wrong submissions, and confidence before submit.
+
+Web/browser commands:
+
+```bash
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source none --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source profile --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source cookie-file --cookie-file <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source header-file --header-file <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source storage-state --storage-state <path> --json
+ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --base-url <url> --auth-source env --auth-env <name> --json
+ctfctl interactive web-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 20 --json
+ctfctl interactive browser-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 30 --json
+ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_web.py --timeout 60 --json
+ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --request-json request.json --json
+ctfctl interactive browser-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script solve_browser.py --timeout 90 --json
+ctfctl interactive web-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+`web-config` stores base URL and auth/session source metadata in operator and board state. It does not read or store cookie values, header values, storage-state JSON contents, environment values, passwords, private keys, or raw flags. Auth source choices are `none`, `profile`, `cookie-file`, `header-file`, `storage-state`, and `env`; the saved metadata contains only the source type plus a path or env var name when needed. Base URLs are validated as HTTP/HTTPS and reject embedded credentials or secret-bearing query keys; mismatched platform profile origins are warnings, not hard failures, because challenge apps often live away from the scoreboard.
+
+`web-probe` performs one bounded GET with the configured auth source. It writes `web/probes/<timestamp>.json` with status, title, forms, links, scripts, endpoint candidates, static asset path/hash summaries, and response header summaries. It intentionally stores body length/hash, not the raw response body. `browser-probe` uses Playwright when available to load the same base URL, write a screenshot, and store console/network summaries under `web/browser_probes/<timestamp>.json`. Browser network rows store method, path, status, and content type only; non-GET/HEAD and destructive-looking requests are blocked. If Playwright is unavailable, the command reports `unavailable` so local fake-web tests can skip cleanly.
+
+`web-attempt` executes either a local script or a JSON request spec and stores `web/attempts/<timestamp>.json`. Scripts receive `CTF_WEB_BASE_URL`, `CTF_WEB_AUTH_SOURCE`, source paths/env names, and `CTF_WEB_PROFILE` when configured; they do not receive raw secret values from the harness. `browser-attempt` runs a local Playwright script with artifact env vars for screenshot, console JSONL, and network JSONL, then records summaries under `web/browser_attempts/<timestamp>.json`. Both attempt commands append to `attempts.md`, update `evidence.md`, extract local candidates into `candidates.jsonl`, and write public-safe metrics with counts, lengths, status, and candidate hashes only. Local raw flag output is allowed for solving; public upload, public writeup, public paste, public git commit, and public git push remain forbidden during an active contest.
 
 Remote service commands:
 

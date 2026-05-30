@@ -18,6 +18,8 @@ Primary risks:
 - Accidental browser auth capture during setup.
 - Duplicate or low-confidence submissions consuming limited attempts.
 - Artifact upload challenges sending generated files to an unofficial endpoint or leaking uploaded artifacts, local paths, raw responses, or auth headers into public snapshots.
+- Web challenge auth/session leakage through configured cookie files, header files, environment variables, profile auth, Playwright storage state, screenshots, console logs, network summaries, or raw response bodies.
+- Browser automation accidentally sending destructive web requests while probing a challenge app.
 - Remote service token leakage through service transcripts, command output, metrics, public snapshots, or target packs.
 - PoW helper output or remote transcripts accidentally carrying service auth material into public artifacts.
 - Concurrent workers racing into duplicate claims or duplicate submits.
@@ -62,6 +64,12 @@ Controls:
 - `ctfctl interactive upload-submit` computes artifact SHA-256 and size before upload, blocks when no endpoint/config exists, and allows live upload only to HTTP/HTTPS endpoints on the configured profile `base_url` origin with submission policy enabled.
 - Artifact upload records store artifact SHA-256, size, submit timestamp, response status, and active status. They do not store auth headers, cookies, browser storage, private keys, raw response bodies, or artifact contents.
 - Accepted/active artifact uploads may update `solved.jsonl`; blocked, rejected, planned, or inactive uploads do not enable writeup generation.
+- Web metadata is local operator state. `ctfctl interactive web-config` stores the challenge base URL, auth source type, file path, storage-state path, or environment variable name without reading or storing raw cookie values, header values, environment values, storage contents, passwords, private keys, or flags.
+- Web auth sources are `none`, `profile`, `cookie-file`, `header-file`, `storage-state`, and `env`. Scripts receive base URL and source metadata through `CTF_WEB_*` environment variables, not raw secret values from the harness.
+- `ctfctl interactive web-probe` writes summarized page structure under `web/probes/`: status, title, forms, links, scripts, endpoint candidates, static path/hash summaries, body length/hash, and header summaries. It does not store raw response bodies, cookie/header values, browser storage values, or raw candidates.
+- `ctfctl interactive browser-probe` writes local-only screenshots and browser summaries under `web/browser_probes/`. Network rows store method, path, status, and content type only; console text is auth-sanitized; storage state is referenced by path only.
+- Browser probing route-blocks non-GET/HEAD and destructive-looking request paths before they are sent. Browser probe tests use only local fake web apps, and Playwright absence is reported as unavailable.
+- `ctfctl interactive web-attempt` and `browser-attempt` store local-only attempts under `web/attempts/` and `web/browser_attempts/`, extract local candidates into `candidates.jsonl`, and record metrics with status/counts/lengths/hashes only. Public-safe snapshots exclude raw web responses, cookies, headers, storage-state values, console/network bodies, screenshots, and raw candidate values.
 - Remote service metadata is local operator state. `ctfctl interactive service-config` stores endpoint, transport, token source kind, token file path or environment variable name, and optional PoW helper path without reading or storing the token value.
 - `ctfctl interactive service-probe` and `service-attempt` write sanitized local-only transcripts under the challenge directory. Token values, cookies, sessions, auth headers, and private keys are redacted before display or record storage; local raw flags may remain visible for solving.
 - Service scripts receive endpoint and token-source metadata through environment variables, not the token value. Token injection happens only after a detected token prompt.

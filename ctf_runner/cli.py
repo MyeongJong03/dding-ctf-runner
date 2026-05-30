@@ -58,6 +58,8 @@ from .handoff import read_handoffs
 from .ingest import brief_for_challenge, ingest_challenge, ingest_text_challenge, ingest_text_file, manifest_path, scan_path
 from .interactive import (
     board_status as interactive_board_status,
+    browser_attempt as interactive_browser_attempt,
+    browser_probe as interactive_browser_probe,
     capabilities_report as interactive_capabilities_report,
     challenge_brief as interactive_challenge_brief,
     claim_challenge as interactive_claim_challenge,
@@ -97,6 +99,10 @@ from .interactive import (
     triage_challenge as interactive_triage_challenge,
     upload_submit as interactive_upload_submit,
     verify_candidate as interactive_verify_candidate,
+    web_attempt as interactive_web_attempt,
+    web_config as interactive_web_config,
+    web_probe as interactive_web_probe,
+    web_status as interactive_web_status,
     writeup_challenge as interactive_writeup_challenge,
 )
 from .multi_worker import run_local_e2e, run_parallel_smoke, worker_status
@@ -516,6 +522,62 @@ def _cmd_interactive_service_attempt(args: argparse.Namespace) -> int:
 
 def _cmd_interactive_service_status(args: argparse.Namespace) -> int:
     data = interactive_service_status(args.contest_id, challenge_id=args.challenge_id)
+    _print_local_json(data)
+    return 0 if data.get("status") in {"ok", "unconfigured"} else 1
+
+
+def _cmd_interactive_web_config(args: argparse.Namespace) -> int:
+    data = interactive_web_config(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        base_url=args.base_url,
+        auth_source=args.auth_source,
+        cookie_file=args.cookie_file,
+        header_file=args.header_file,
+        storage_state=args.storage_state,
+        auth_env=args.auth_env,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_web_probe(args: argparse.Namespace) -> int:
+    data = interactive_web_probe(args.contest_id, challenge_id=args.challenge_id, timeout=args.timeout)
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_browser_probe(args: argparse.Namespace) -> int:
+    data = interactive_browser_probe(args.contest_id, challenge_id=args.challenge_id, timeout=args.timeout)
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_web_attempt(args: argparse.Namespace) -> int:
+    data = interactive_web_attempt(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        script=args.script,
+        request_json=args.request_json,
+        timeout=args.timeout,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_browser_attempt(args: argparse.Namespace) -> int:
+    data = interactive_browser_attempt(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        script=args.script,
+        timeout=args.timeout,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_web_status(args: argparse.Namespace) -> int:
+    data = interactive_web_status(args.contest_id, challenge_id=args.challenge_id)
     _print_local_json(data)
     return 0 if data.get("status") in {"ok", "unconfigured"} else 1
 
@@ -2405,6 +2467,49 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_service_status.add_argument("--challenge-id", required=True)
     interactive_service_status.add_argument("--json", action="store_true")
     interactive_service_status.set_defaults(func=_cmd_interactive_service_status)
+    interactive_web_config = interactive_sub.add_parser("web-config")
+    interactive_web_config.add_argument("--contest-id", required=True)
+    interactive_web_config.add_argument("--challenge-id", required=True)
+    interactive_web_config.add_argument("--base-url")
+    interactive_web_config.add_argument("--auth-source", choices=["none", "profile", "cookie-file", "header-file", "storage-state", "env"])
+    interactive_web_config.add_argument("--cookie-file")
+    interactive_web_config.add_argument("--header-file")
+    interactive_web_config.add_argument("--storage-state")
+    interactive_web_config.add_argument("--auth-env")
+    interactive_web_config.add_argument("--json", action="store_true")
+    interactive_web_config.set_defaults(func=_cmd_interactive_web_config)
+    interactive_web_probe = interactive_sub.add_parser("web-probe")
+    interactive_web_probe.add_argument("--contest-id", required=True)
+    interactive_web_probe.add_argument("--challenge-id", required=True)
+    interactive_web_probe.add_argument("--timeout", type=int, default=20)
+    interactive_web_probe.add_argument("--json", action="store_true")
+    interactive_web_probe.set_defaults(func=_cmd_interactive_web_probe)
+    interactive_browser_probe = interactive_sub.add_parser("browser-probe")
+    interactive_browser_probe.add_argument("--contest-id", required=True)
+    interactive_browser_probe.add_argument("--challenge-id", required=True)
+    interactive_browser_probe.add_argument("--timeout", type=int, default=30)
+    interactive_browser_probe.add_argument("--json", action="store_true")
+    interactive_browser_probe.set_defaults(func=_cmd_interactive_browser_probe)
+    interactive_web_attempt = interactive_sub.add_parser("web-attempt")
+    interactive_web_attempt.add_argument("--contest-id", required=True)
+    interactive_web_attempt.add_argument("--challenge-id", required=True)
+    interactive_web_attempt.add_argument("--script")
+    interactive_web_attempt.add_argument("--request-json")
+    interactive_web_attempt.add_argument("--timeout", type=int, default=60)
+    interactive_web_attempt.add_argument("--json", action="store_true")
+    interactive_web_attempt.set_defaults(func=_cmd_interactive_web_attempt)
+    interactive_browser_attempt = interactive_sub.add_parser("browser-attempt")
+    interactive_browser_attempt.add_argument("--contest-id", required=True)
+    interactive_browser_attempt.add_argument("--challenge-id", required=True)
+    interactive_browser_attempt.add_argument("--script", required=True)
+    interactive_browser_attempt.add_argument("--timeout", type=int, default=90)
+    interactive_browser_attempt.add_argument("--json", action="store_true")
+    interactive_browser_attempt.set_defaults(func=_cmd_interactive_browser_attempt)
+    interactive_web_status = interactive_sub.add_parser("web-status")
+    interactive_web_status.add_argument("--contest-id", required=True)
+    interactive_web_status.add_argument("--challenge-id", required=True)
+    interactive_web_status.add_argument("--json", action="store_true")
+    interactive_web_status.set_defaults(func=_cmd_interactive_web_status)
     interactive_candidates = interactive_sub.add_parser("candidates")
     interactive_candidates.add_argument("--contest-id", required=True)
     interactive_candidates.add_argument("--challenge-id", required=True)

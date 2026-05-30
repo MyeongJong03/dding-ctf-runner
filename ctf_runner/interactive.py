@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -69,6 +70,11 @@ PLAYBOOK_CATEGORIES = ("web", "pwn", "rev", "crypto", "forensics/misc", "osint",
 SERVICE_TOKEN_SOURCES = ("none", "profile", "file", "env")
 SERVICE_TRANSPORTS = ("auto", "plain", "tls")
 SERVICE_TRANSCRIPT_LIMIT = 64 * 1024
+WEB_AUTH_SOURCES = ("none", "profile", "cookie-file", "header-file", "storage-state", "env")
+WEB_RESPONSE_LIMIT = 2 * 1024 * 1024
+WEB_TEXT_SCAN_LIMIT = 512 * 1024
+WEB_BROWSER_NETWORK_LIMIT = 160
+WEB_BROWSER_CONSOLE_LIMIT = 120
 
 
 def init_operator(
@@ -566,6 +572,7 @@ def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None)
         "challenge_path": _display(context["challenge_dir"]),
         "remote_endpoint_count": len(context["remote_endpoints"]),
         "service_metadata": _service_public_metadata(context.get("service_metadata") or {}) if context.get("service_metadata") else {},
+        "web_metadata": _web_public_metadata(context.get("web_metadata") or {}) if context.get("web_metadata") else {},
         "toolchain": context.get("toolchain_summary") or {},
     }
 
@@ -623,6 +630,10 @@ def triage_challenge(
 
     files = _triage_file_inventory(context)
     command_rows = _run_category_triage_commands(effective_category, context, files)
+    web_probe_result: dict[str, Any] = {}
+    if effective_category == "web" and (context.get("web_metadata") or {}).get("base_url"):
+        web_probe_result = web_probe(contest_id, challenge_id=challenge_key, timeout=10)
+        context["web_probe_result"] = web_probe_result
     for fallback in _selected_fallback_rows(command_rows):
         _record_metrics_event(
             root,
@@ -1025,6 +1036,644 @@ def run_attempt(
         "candidates": [_candidate_local_payload(row) for row in detected],
         "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
         "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
+    }
+
+
+def web_config(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    base_url: str | None = None,
+    auth_source: str | None = None,
+    cookie_file: str | Path | None = None,
+    header_file: str | Path | None = None,
+    storage_state: str | Path | None = None,
+    auth_env: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    existing = _web_metadata_for_item(root, board, item, challenge_key)
+    context = _target_context(contest_id, root, item)
+    resolved_base = str(base_url or existing.get("base_url") or _web_base_url_from_context(context) or "").strip()
+    if not resolved_base:
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "reason": "base_url_missing"}
+    url_check = _validate_endpoint_url_syntax(resolved_base, label="base_url")
+    if not url_check.get("allowed"):
+        return {
+            "status": "blocked",
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "reason": url_check.get("reason") or "base_url_invalid",
+            "validation": url_check,
+        }
+    auth = _normalize_web_auth_source(
+        auth_source,
+        cookie_file=cookie_file,
+        header_file=header_file,
+        storage_state=storage_state,
+        auth_env=auth_env,
+        existing=existing.get("auth_source") if isinstance(existing.get("auth_source"), Mapping) else None,
+    )
+    if auth.get("status") != "ok":
+        return {
+            "status": "blocked",
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "reason": auth.get("reason") or "invalid_auth_source",
+        }
+    metadata = _build_web_metadata(
+        challenge_key,
+        base_url=resolved_base,
+        base_url_source="cli" if base_url else (str(existing.get("base_url_source") or "") or "challenge_metadata"),
+        auth_source=auth,
+    )
+    warnings = _web_config_warnings(root, metadata)
+    metadata["warnings"] = warnings
+    _save_challenge_web_metadata(root, board, challenge_key, metadata)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="web_configured",
+        challenge_id=challenge_key,
+        data=_web_metric_payload(metadata, status="ok", extra={"warning_count": len(warnings)}),
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "metadata": _web_public_metadata(metadata),
+        "warnings": warnings,
+    }
+
+
+def web_probe(contest_id: str, *, challenge_id: str, timeout: int = 20) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    metadata = _ensure_web_metadata(root, board, item, challenge_key)
+    if not metadata or not metadata.get("base_url"):
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "reason": "base_url_missing"}
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    timeout = max(1, int(timeout or 20))
+    started_at = utc_now()
+    probe_dir = challenge_dir / "web" / "probes"
+    probe_path = probe_dir / f"{_timestamp_filename(started_at)}.json"
+    auth = _web_live_headers(root, metadata)
+    if auth.get("status") != "ok":
+        record = _web_probe_error_record(
+            contest_id,
+            challenge_key,
+            metadata,
+            started_at=started_at,
+            timeout=timeout,
+            status="blocked",
+            reason=str(auth.get("reason") or "auth_source_unavailable"),
+        )
+        _write_json_raw(probe_path, record)
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="web_probe_completed",
+            challenge_id=challenge_key,
+            data=_web_metric_payload(metadata, status="blocked", extra={"reason": record["error"], "probe_path": _display(probe_path)}),
+        )
+        return _web_probe_public_result(record, probe_path)
+
+    response = _web_fetch(str(metadata["base_url"]), headers=auth.get("headers") or {}, timeout=timeout)
+    completed_at = utc_now()
+    parsed = _parse_web_probe_response(response, str(metadata["base_url"]))
+    record = {
+        "schema": "interactive_web_probe_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "timeout_sec": timeout,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")),
+        "auth_source": _web_public_auth_source(metadata),
+        "client": response.get("client") or "",
+        "status": response.get("status") or "error",
+        "http_status": response.get("http_status"),
+        "final_url": _web_public_url(str(response.get("final_url") or "")),
+        "final_path": _web_url_path(str(response.get("final_url") or metadata.get("base_url") or "")),
+        "content_type": response.get("content_type") or "",
+        "headers_summary": _web_headers_summary(response.get("headers") if isinstance(response.get("headers"), Mapping) else {}),
+        "title": parsed.get("title") or "",
+        "forms": parsed.get("forms") or [],
+        "links": parsed.get("links") or [],
+        "scripts": parsed.get("scripts") or [],
+        "static_links": parsed.get("static_links") or [],
+        "endpoint_candidates": parsed.get("endpoint_candidates") or [],
+        "body_len": int(response.get("body_len") or 0),
+        "body_sha256": response.get("body_sha256") or "",
+        "error": _web_safe_text(str(response.get("error") or ""), limit=300),
+    }
+    _write_json_raw(probe_path, record)
+    _append_text(
+        challenge_dir / "attempts.md",
+        f"\n- web_probe: status={record['status']} http={record['http_status']} title={record['title'] or 'none'} record={_display(probe_path)} ({completed_at})\n",
+    )
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="web_probe_completed",
+        challenge_id=challenge_key,
+        data=_web_metric_payload(
+            metadata,
+            status=str(record["status"]),
+            extra={
+                "http_status": record["http_status"],
+                "form_count": len(record["forms"]),
+                "link_count": len(record["links"]),
+                "script_count": len(record["scripts"]),
+                "endpoint_candidate_count": len(record["endpoint_candidates"]),
+                "probe_path": _display(probe_path),
+            },
+        ),
+    )
+    return _web_probe_public_result(record, probe_path)
+
+
+def browser_probe(contest_id: str, *, challenge_id: str, timeout: int = 30) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    metadata = _ensure_web_metadata(root, board, item, challenge_key)
+    if not metadata or not metadata.get("base_url"):
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "reason": "base_url_missing"}
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    timeout = max(1, int(timeout or 30))
+    started_at = utc_now()
+    browser_dir = challenge_dir / "web" / "browser_probes"
+    browser_dir.mkdir(parents=True, exist_ok=True)
+    probe_path = browser_dir / f"{_timestamp_filename(started_at)}.json"
+    screenshot_path = challenge_dir / "web" / "screenshots" / f"probe-{_timestamp_filename(started_at)}.png"
+
+    capture = _web_browser_capture(
+        root,
+        metadata,
+        screenshot_path=screenshot_path,
+        timeout=timeout,
+        kind="probe",
+    )
+    completed_at = utc_now()
+    record = {
+        "schema": "interactive_browser_probe_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "timeout_sec": timeout,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")),
+        "auth_source": _web_public_auth_source(metadata),
+        **capture,
+    }
+    _write_json_raw(probe_path, record)
+    _append_text(
+        challenge_dir / "attempts.md",
+        f"\n- browser_probe: status={record['status']} title={record.get('title') or 'none'} screenshot={record.get('screenshot_path') or 'none'} record={_display(probe_path)} ({completed_at})\n",
+    )
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="browser_probe_completed",
+        challenge_id=challenge_key,
+        data=_web_metric_payload(
+            metadata,
+            status=str(record["status"]),
+            extra={
+                "network_count": len(record.get("network_summary") or []),
+                "console_count": len(record.get("console_summary") or []),
+                "screenshot_present": bool(record.get("screenshot_path")),
+                "probe_path": _display(probe_path),
+            },
+        ),
+    )
+    return _browser_probe_public_result(record, probe_path)
+
+
+def web_attempt(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    script: str | Path | None = None,
+    request_json: str | Path | None = None,
+    timeout: int = 60,
+    agent: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": "web"}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _ensure_web_metadata(root, board, item, challenge_key)
+    if not metadata or not metadata.get("base_url"):
+        _append_text(challenge_dir / "next_steps.md", f"\n- {utc_now()} web-attempt blocked: base URL missing\n")
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": "base_url_missing"}
+    if script and request_json:
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": "script_and_request_json_are_mutually_exclusive"}
+    timeout = max(1, int(timeout or 60))
+    started = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="web_attempt_started",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_web_metric_payload(metadata, status="started", extra={"timeout_sec": timeout, "mode": "script" if script else "request_json"}),
+    )
+    started_at = str(started.get("timestamp") or utc_now())
+    attempt_dir = challenge_dir / "web" / "attempts"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_path = attempt_dir / f"{_timestamp_filename(started_at)}.json"
+
+    if request_json:
+        execution = _run_web_request_json(request_json, root=root, challenge_dir=challenge_dir, metadata=metadata, timeout=timeout)
+    else:
+        execution = _run_web_attempt_script(script, root=root, challenge_dir=challenge_dir, contest_id=contest_id, challenge_id=challenge_key, metadata=metadata, timeout=timeout)
+    if execution.get("status") == "blocked":
+        reason = str(execution.get("reason") or "web_attempt_unavailable")
+        _append_text(challenge_dir / "next_steps.md", f"\n- {utc_now()} web-attempt blocked: {reason}\n")
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": reason}
+
+    completed_at = utc_now()
+    stdout = _web_auth_sanitize_text(str(execution.get("stdout") or ""))
+    stderr = _web_auth_sanitize_text(str(execution.get("stderr") or ""))
+    runtime_sec = float(execution.get("runtime_sec") or 0.0)
+    timed_out = bool(execution.get("timed_out"))
+    returncode = execution.get("returncode")
+    command_display = str(execution.get("command") or "")
+    missing_tool = detect_missing_tool_failure(stdout, stderr) if returncode not in (0, None) or execution.get("error") else None
+    policy = load_submit_policy()
+    detected = _detect_attempt_candidates(
+        contest_id,
+        challenge_key,
+        stdout=stdout,
+        stderr=stderr,
+        command=command_display,
+        attempt_path=attempt_path,
+        timestamp=completed_at,
+        policy=policy,
+    )
+    for row in detected:
+        if str(row.get("source") or "") == "attempt_stdout":
+            row["source"] = "web_response" if request_json else "web_stdout"
+        elif str(row.get("source") or "") == "attempt_stderr":
+            row["source"] = "web_stderr"
+        row["derivation"] = "detected by interactive web-attempt"
+    stored_candidates = _append_detected_candidates(challenge_dir, detected)
+    attempt_record = {
+        "schema": "interactive_web_attempt_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "script": _display(Path(script).expanduser()) if script else "",
+        "request_json": _display(Path(request_json).expanduser()) if request_json else "",
+        "timeout_sec": timeout,
+        "timed_out": timed_out,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")),
+        "auth_source": _web_public_auth_source(metadata),
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_len": len(stdout),
+        "stderr_len": len(stderr),
+        "error": _web_safe_text(str(execution.get("error") or ""), limit=300),
+        "response": execution.get("response") if isinstance(execution.get("response"), Mapping) else {},
+        "missing_tool": missing_tool or {},
+        "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+        "candidate_count": len(detected),
+        "stored_candidate_count": len(stored_candidates),
+        "attempt_kind": "web",
+    }
+    _write_json_raw(attempt_path, attempt_record)
+    _append_attempt_markdown(challenge_dir, attempt_record, attempt_path, detected)
+    _append_attempt_evidence(challenge_dir, attempt_record, attempt_path, detected)
+    if missing_tool:
+        _append_missing_tool_notes(challenge_dir, missing_tool, attempt_path)
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="missing_tool_observed",
+            agent=agent,
+            challenge_id=challenge_key,
+            data=_missing_tool_metric_payload(missing_tool),
+        )
+    if detected:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="web_candidate_found",
+            agent=agent,
+            challenge_id=challenge_key,
+            data={"candidate_count": len(detected), "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected]},
+        )
+    completed_event = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="web_attempt_completed",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_web_metric_payload(
+            metadata,
+            status="timeout" if timed_out else ("ok" if returncode in {0, None} and not execution.get("error") else "completed_nonzero"),
+            extra={
+                "runtime_sec": runtime_sec,
+                "timed_out": timed_out,
+                "returncode": returncode,
+                "stdout_len": len(stdout),
+                "stderr_len": len(stderr),
+                "candidate_count": len(detected),
+                "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+                "attempt_path": _display(attempt_path),
+            },
+        ),
+    )
+    status = "timeout" if timed_out else ("missing_tool" if missing_tool else ("ok" if returncode in {0, None} and not execution.get("error") else "completed_nonzero"))
+    return {
+        "status": status,
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "attempt_path": _display(attempt_path),
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "timed_out": timed_out,
+        "stdout": stdout,
+        "stderr": stderr,
+        "response": attempt_record["response"],
+        "missing_tool": missing_tool or {},
+        "candidates": [_candidate_local_payload(row) for row in detected],
+        "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
+        "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
+        "attempt_kind": "web",
+    }
+
+
+def browser_attempt(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    script: str | Path,
+    timeout: int = 90,
+    agent: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": "web"}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _ensure_web_metadata(root, board, item, challenge_key)
+    if not metadata or not metadata.get("base_url"):
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": "base_url_missing"}
+    timeout = max(1, int(timeout or 90))
+    started = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="browser_attempt_started",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_web_metric_payload(metadata, status="started", extra={"timeout_sec": timeout}),
+    )
+    started_at = str(started.get("timestamp") or utc_now())
+    attempt_dir = challenge_dir / "web" / "browser_attempts"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    timestamp_slug = _timestamp_filename(started_at)
+    attempt_path = attempt_dir / f"{timestamp_slug}.json"
+    artifact_dir = attempt_dir / timestamp_slug
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    env = _web_script_env(root, contest_id=contest_id, challenge_id=challenge_key, metadata=metadata)
+    env.update(
+        {
+            "CTF_BROWSER_ARTIFACT_DIR": _display(artifact_dir),
+            "CTF_BROWSER_SCREENSHOT": _display(artifact_dir / "screenshot.png"),
+            "CTF_BROWSER_CONSOLE_JSONL": _display(artifact_dir / "console.jsonl"),
+            "CTF_BROWSER_NETWORK_JSONL": _display(artifact_dir / "network.jsonl"),
+        }
+    )
+    execution = _run_script_with_env(
+        script,
+        challenge_dir=challenge_dir,
+        env_updates=env,
+        timeout=timeout,
+    )
+    if execution.get("status") == "blocked":
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": execution.get("reason") or "script_not_found"}
+    script_screenshot = _existing_artifact_path(artifact_dir / "screenshot.png")
+    script_console = _read_jsonl(artifact_dir / "console.jsonl")
+    script_network = _read_jsonl(artifact_dir / "network.jsonl")
+    capture: dict[str, Any] = {}
+    if not script_screenshot:
+        capture = _web_browser_capture(
+            root,
+            metadata,
+            screenshot_path=artifact_dir / "post-script-screenshot.png",
+            timeout=min(timeout, 30),
+            kind="attempt",
+        )
+    completed_at = utc_now()
+    stdout = _web_auth_sanitize_text(str(execution.get("stdout") or ""))
+    stderr = _web_auth_sanitize_text(str(execution.get("stderr") or ""))
+    runtime_sec = float(execution.get("runtime_sec") or 0.0)
+    timed_out = bool(execution.get("timed_out"))
+    returncode = execution.get("returncode")
+    command_display = str(execution.get("command") or "")
+    console_summary = _web_artifact_console_summary(script_console) or list(capture.get("console_summary") or [])
+    network_summary = _web_artifact_network_summary(script_network) or list(capture.get("network_summary") or [])
+    screenshot = script_screenshot or str(capture.get("screenshot_path") or "")
+    policy = load_submit_policy()
+    detected = _detect_attempt_candidates(
+        contest_id,
+        challenge_key,
+        stdout="\n".join([stdout, _jsonl_text_for_candidate_scan(script_console), _jsonl_text_for_candidate_scan(script_network)]),
+        stderr=stderr,
+        command=command_display,
+        attempt_path=attempt_path,
+        timestamp=completed_at,
+        policy=policy,
+    )
+    for row in detected:
+        if str(row.get("source") or "") == "attempt_stdout":
+            row["source"] = "browser_output"
+        elif str(row.get("source") or "") == "attempt_stderr":
+            row["source"] = "browser_stderr"
+        row["derivation"] = "detected by interactive browser-attempt"
+    stored_candidates = _append_detected_candidates(challenge_dir, detected)
+    missing_tool = detect_missing_tool_failure(stdout, stderr) if returncode not in (0, None) or execution.get("error") else None
+    attempt_record = {
+        "schema": "interactive_browser_attempt_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "script": _display(Path(script).expanduser()),
+        "timeout_sec": timeout,
+        "timed_out": timed_out,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")),
+        "auth_source": _web_public_auth_source(metadata),
+        "artifact_dir": _display(artifact_dir),
+        "screenshot_path": screenshot,
+        "console_summary": console_summary[:WEB_BROWSER_CONSOLE_LIMIT],
+        "network_summary": network_summary[:WEB_BROWSER_NETWORK_LIMIT],
+        "browser_capture_status": capture.get("status") or ("script_artifacts" if script_screenshot else "not_attempted"),
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_len": len(stdout),
+        "stderr_len": len(stderr),
+        "error": _web_safe_text(str(execution.get("error") or capture.get("error") or ""), limit=300),
+        "missing_tool": missing_tool or {},
+        "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+        "candidate_count": len(detected),
+        "stored_candidate_count": len(stored_candidates),
+        "attempt_kind": "browser",
+    }
+    _write_json_raw(attempt_path, attempt_record)
+    _append_attempt_markdown(challenge_dir, attempt_record, attempt_path, detected)
+    _append_attempt_evidence(challenge_dir, attempt_record, attempt_path, detected)
+    if missing_tool:
+        _append_missing_tool_notes(challenge_dir, missing_tool, attempt_path)
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="missing_tool_observed",
+            agent=agent,
+            challenge_id=challenge_key,
+            data=_missing_tool_metric_payload(missing_tool),
+        )
+    completed_event = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="browser_attempt_completed",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_web_metric_payload(
+            metadata,
+            status="timeout" if timed_out else ("ok" if returncode == 0 else "completed_nonzero"),
+            extra={
+                "runtime_sec": runtime_sec,
+                "timed_out": timed_out,
+                "returncode": returncode,
+                "stdout_len": len(stdout),
+                "stderr_len": len(stderr),
+                "network_count": len(attempt_record["network_summary"]),
+                "console_count": len(attempt_record["console_summary"]),
+                "screenshot_present": bool(screenshot),
+                "candidate_count": len(detected),
+                "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+                "attempt_path": _display(attempt_path),
+            },
+        ),
+    )
+    status = "timeout" if timed_out else ("missing_tool" if missing_tool else ("ok" if returncode == 0 else "completed_nonzero"))
+    return {
+        "status": status,
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "attempt_path": _display(attempt_path),
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "returncode": returncode,
+        "runtime_sec": runtime_sec,
+        "timed_out": timed_out,
+        "screenshot_path": screenshot,
+        "console_summary": attempt_record["console_summary"],
+        "network_summary": attempt_record["network_summary"],
+        "stdout": stdout,
+        "stderr": stderr,
+        "missing_tool": missing_tool or {},
+        "candidates": [_candidate_local_payload(row) for row in detected],
+        "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
+        "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
+        "attempt_kind": "browser",
+    }
+
+
+def web_status(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    metadata = _web_metadata_for_item(root, board, item, challenge_key)
+    derived = False
+    if not metadata:
+        context = _target_context(contest_id, root, item)
+        base_url = _web_base_url_from_context(context)
+        if base_url:
+            metadata = _build_web_metadata(
+                challenge_key,
+                base_url=base_url,
+                base_url_source="challenge_metadata",
+                auth_source={"status": "ok", "type": "none"},
+            )
+            derived = True
+    challenge_dir = _challenge_path(contest_id, item)
+    last_probe = _last_web_record(challenge_dir / "web" / "probes")
+    last_browser_probe = _last_web_record(challenge_dir / "web" / "browser_probes")
+    last_attempt = _last_web_record(challenge_dir / "web" / "attempts")
+    last_browser_attempt = _last_web_record(challenge_dir / "web" / "browser_attempts")
+    candidates = _coalesced_candidates(challenge_dir)
+    screenshot_present = bool(
+        _record_has_screenshot(last_browser_probe)
+        or _record_has_screenshot(last_browser_attempt)
+        or list((challenge_dir / "web" / "screenshots").glob("*.png"))
+    )
+    return {
+        "status": "ok" if metadata else "unconfigured",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "configured": bool(metadata and not derived),
+        "derived_from_challenge_metadata": derived,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")) if metadata else "",
+        "auth_source": _web_public_auth_source(metadata) if metadata else {"type": "none"},
+        "auth_source_present": _web_auth_source_present(root, metadata) if metadata else False,
+        "last_probe": _web_record_summary(last_probe),
+        "last_browser_probe": _web_record_summary(last_browser_probe),
+        "last_attempt": _web_record_summary(last_attempt),
+        "last_browser_attempt": _web_record_summary(last_browser_attempt),
+        "screenshot_present": screenshot_present,
+        "candidate_count": len(candidates),
     }
 
 
@@ -1699,9 +2348,28 @@ def solve_loop(
     limit = max(1, int(max_attempts or 5))
     service_metadata = _service_metadata_for_item(root, board, item, challenge_key)
     use_service_attempt = _service_solve_loop_eligible(service_metadata)
+    web_metadata = _web_metadata_for_item(root, board, item, challenge_key)
+    use_web_attempt = bool(web_metadata and web_metadata.get("base_url") and not use_service_attempt)
+    use_browser_attempt = bool(use_web_attempt and starter_fs_path and _starter_looks_browser_based(starter_fs_path))
     for attempt_index in range(1, limit + 1):
         if use_service_attempt:
             attempt = service_attempt(
+                contest_id,
+                challenge_id=challenge_key,
+                agent=agent,
+                script=starter_fs_path,
+                timeout=120,
+            )
+        elif use_browser_attempt:
+            attempt = browser_attempt(
+                contest_id,
+                challenge_id=challenge_key,
+                agent=agent,
+                script=starter_fs_path,
+                timeout=120,
+            )
+        elif use_web_attempt:
+            attempt = web_attempt(
                 contest_id,
                 challenge_id=challenge_key,
                 agent=agent,
@@ -2489,6 +3157,12 @@ def metrics_baseline(*, name: str | None = None, output_dir: str | Path | None =
             "prepare_target": True,
             "brief": True,
             "run_attempt": True,
+            "web_config": True,
+            "web_probe": True,
+            "browser_probe": True,
+            "web_attempt": True,
+            "browser_attempt": True,
+            "web_status": True,
             "candidates": True,
             "verify_candidate": True,
             "solve_loop": True,
@@ -4608,6 +5282,9 @@ def _target_score(root: Path, contest_id: str, item: Mapping[str, Any], *, statu
     if context["remote_endpoints"]:
         score += 25
         reasons.append("remote_endpoint")
+    if (context.get("web_metadata") or {}).get("base_url"):
+        score += 25
+        reasons.append("web_base_url")
 
     category_guess = context["category_guess"]
     confidence = int(category_guess.get("confidence") or 0)
@@ -4657,6 +5334,7 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
     memo_summaries = _memo_summaries(challenge_dir)
     remote_endpoints = _remote_endpoints(item, brief_path=brief_path)
     service_metadata = _service_metadata_for_item(root, {"challenges": [item]}, item, str(item.get("challenge_id") or ""))
+    web_metadata = _web_metadata_for_item(root, {"challenges": [item]}, item, str(item.get("challenge_id") or ""))
     if not service_metadata:
         service_endpoint = None
         for endpoint_text in remote_endpoints:
@@ -4670,6 +5348,15 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
                 endpoint_source="challenge_metadata",
                 token_source={"type": "none"},
                 pow_helper=None,
+            )
+    if not web_metadata:
+        web_base_url = _web_base_url_from_endpoints(remote_endpoints)
+        if web_base_url:
+            web_metadata = _build_web_metadata(
+                str(item.get("challenge_id") or ""),
+                base_url=web_base_url,
+                base_url_source="challenge_metadata",
+                auth_source={"status": "ok", "type": "none"},
             )
     category_guess = _category_guess(item, candidate_dirs, scan_paths=scan_paths, has_remote=bool(remote_endpoints))
     top_files = _top_interesting_files(candidate_dirs, manifest_paths=manifest_paths, scan_paths=scan_paths)
@@ -4686,6 +5373,7 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
         "memo_summaries": memo_summaries,
         "remote_endpoints": remote_endpoints,
         "service_metadata": service_metadata,
+        "web_metadata": web_metadata,
         "category_guess": category_guess,
         "top_files": top_files,
     }
@@ -5326,6 +6014,24 @@ def _category_triage_findings(
         )
     elif context.get("remote_endpoints"):
         findings.append(_finding("remote", "Remote endpoints in local metadata", "; ".join(str(value) for value in context["remote_endpoints"][:6])))
+    if context.get("web_metadata"):
+        web = _web_public_metadata(context["web_metadata"])
+        findings.append(
+            _finding(
+                "web_metadata",
+                "Web metadata",
+                f"base_url={web.get('base_url')} auth_source={(web.get('auth_source') or {}).get('type') or 'none'}",
+            )
+        )
+    if context.get("web_probe_result"):
+        probe = context["web_probe_result"] if isinstance(context["web_probe_result"], Mapping) else {}
+        findings.append(
+            _finding(
+                "web_probe",
+                "Web probe",
+                f"status={probe.get('status')} http={probe.get('http_status')} title={probe.get('title')} forms={len(probe.get('forms') or [])} endpoints={len(probe.get('endpoint_candidates') or [])}",
+            )
+        )
 
     if category == "web":
         findings.extend(_web_triage_findings(files))
@@ -5568,6 +6274,10 @@ def _triage_next_steps(category: str, findings: list[dict[str, Any]], context: M
         contest_id = str(context.get("contest_id") or "<contest>")
         challenge_id = str((context.get("service_metadata") or {}).get("challenge_id") or "<challenge>")
         steps.append(f"Probe the remote service with ctfctl interactive service-probe --contest-id {contest_id} --challenge-id {challenge_id} --json before manual payload work.")
+    if category == "web" and context.get("web_metadata"):
+        contest_id = str(context.get("contest_id") or "<contest>")
+        challenge_id = str((context.get("web_metadata") or {}).get("challenge_id") or "<challenge>")
+        steps.append(f"Run ctfctl interactive web-probe --contest-id {contest_id} --challenge-id {challenge_id} --json, then use web-attempt for reproducible requests.Session experiments.")
     elif not context.get("remote_endpoints") and category in {"web", "pwn"}:
         steps.append("Find or record service connection info before remote testing.")
     toolchain = context.get("toolchain_summary") if isinstance(context.get("toolchain_summary"), Mapping) else {}
@@ -6749,6 +7459,1153 @@ def _service_sanitize_text(text: str, *, secrets: Iterable[str] | None = None) -
     return safe
 
 
+class _WebProbeParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self.links: list[dict[str, str]] = []
+        self.scripts: list[dict[str, str]] = []
+        self.forms: list[dict[str, Any]] = []
+        self._in_title = False
+        self._active_script: dict[str, str] | None = None
+        self._active_form: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attr = {key.lower(): value or "" for key, value in attrs}
+        if tag == "title":
+            self._in_title = True
+        if tag in {"a", "link", "area"} and (attr.get("href") or attr.get("data-href") or attr.get("data-url")):
+            self.links.append(
+                {
+                    "tag": tag,
+                    "href": attr.get("href") or attr.get("data-href") or attr.get("data-url") or "",
+                    "rel": attr.get("rel", ""),
+                    "text": "",
+                }
+            )
+        if tag in {"img", "source", "iframe"} and attr.get("src"):
+            self.links.append({"tag": tag, "href": attr.get("src", ""), "rel": "", "text": ""})
+        if tag == "script":
+            self._active_script = {"src": attr.get("src", ""), "type": attr.get("type", ""), "id": attr.get("id", ""), "text": ""}
+        if tag == "form":
+            self._active_form = {
+                "method": (attr.get("method") or "get").upper(),
+                "action": attr.get("action", ""),
+                "id": attr.get("id", ""),
+                "name": attr.get("name", ""),
+                "inputs": [],
+            }
+            self.forms.append(self._active_form)
+        if tag in {"input", "textarea", "select", "button"} and self._active_form is not None:
+            inputs = self._active_form.setdefault("inputs", [])
+            if isinstance(inputs, list):
+                inputs.append({"tag": tag, "name": attr.get("name", ""), "type": attr.get("type", ""), "id": attr.get("id", "")})
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = False
+        elif tag == "script" and self._active_script is not None:
+            text = str(self._active_script.get("text") or "")
+            self._active_script["text"] = text[:WEB_TEXT_SCAN_LIMIT]
+            self.scripts.append(self._active_script)
+            self._active_script = None
+        elif tag == "form":
+            self._active_form = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title = " ".join((self.title + " " + data).split())[:300]
+        if self._active_script is not None:
+            self._active_script["text"] = str(self._active_script.get("text") or "") + data
+        if self.links and data.strip():
+            current = self.links[-1]
+            if current.get("tag") == "a":
+                current["text"] = " ".join((current.get("text", "") + " " + data.strip()).split())[:200]
+
+
+def _save_challenge_web_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
+    _save_challenge_local_metadata(root, board, challenge_id, "challenge_web_metadata", "web_metadata", _web_public_metadata(metadata))
+
+
+def _ensure_web_metadata(root: Path, board: dict[str, Any], item: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
+    metadata = _web_metadata_for_item(root, board, item, challenge_id)
+    if metadata:
+        return metadata
+    context = _target_context(str(board.get("contest_id") or ""), root, item)
+    base_url = _web_base_url_from_context(context)
+    if not base_url:
+        return {}
+    metadata = _build_web_metadata(
+        challenge_id,
+        base_url=base_url,
+        base_url_source="challenge_metadata",
+        auth_source={"status": "ok", "type": "none"},
+    )
+    _save_challenge_web_metadata(root, board, challenge_id, metadata)
+    return metadata
+
+
+def _web_metadata_for_item(root: Path, board: Mapping[str, Any], item: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
+    keys = _challenge_keys(item) | {_normalize(challenge_id)}
+    sources: list[Any] = []
+    config = _operator_config(root)
+    sources.append(config.get("challenge_web_metadata") if isinstance(config.get("challenge_web_metadata"), Mapping) else {})
+    sources.append(board.get("web_metadata") if isinstance(board.get("web_metadata"), Mapping) else {})
+    if isinstance(item.get("web_metadata"), Mapping):
+        sources.append({challenge_id: item.get("web_metadata")})
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, metadata in source.items():
+            if _normalize(str(key)) not in keys or not isinstance(metadata, Mapping):
+                continue
+            normalized = _normalize_web_metadata(metadata)
+            if normalized:
+                return normalized
+    return {}
+
+
+def _normalize_web_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    base_url = str(metadata.get("base_url") or metadata.get("url") or "").strip()
+    if not base_url:
+        return {}
+    auth_source = metadata.get("auth_source") if isinstance(metadata.get("auth_source"), Mapping) else {}
+    result = {
+        "schema": "interactive_web_metadata_v1",
+        "challenge_id": str(metadata.get("challenge_id") or ""),
+        "base_url": base_url.rstrip("/"),
+        "base_url_source": str(metadata.get("base_url_source") or metadata.get("source") or ""),
+        "auth_source": _web_public_auth_source({"auth_source": auth_source}),
+        "updated_at": str(metadata.get("updated_at") or ""),
+        "warnings": [str(item) for item in _list_values(metadata.get("warnings"))],
+    }
+    return result
+
+
+def _build_web_metadata(
+    challenge_id: str,
+    *,
+    base_url: str,
+    base_url_source: str,
+    auth_source: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": "interactive_web_metadata_v1",
+        "challenge_id": challenge_id,
+        "base_url": str(base_url).strip().rstrip("/"),
+        "base_url_source": base_url_source,
+        "auth_source": _web_public_auth_source({"auth_source": auth_source}),
+        "updated_at": utc_now(),
+        "warnings": [],
+    }
+
+
+def _web_public_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_web_metadata(metadata) or dict(metadata)
+    return {
+        "schema": "interactive_web_metadata_v1",
+        "challenge_id": str(normalized.get("challenge_id") or metadata.get("challenge_id") or ""),
+        "base_url": _web_public_url(str(normalized.get("base_url") or metadata.get("base_url") or "")),
+        "base_url_source": str(normalized.get("base_url_source") or ""),
+        "auth_source": _web_public_auth_source(normalized),
+        "updated_at": str(normalized.get("updated_at") or ""),
+        "warnings": [str(item) for item in _list_values(normalized.get("warnings"))],
+    }
+
+
+def _web_public_auth_source(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    auth = metadata.get("auth_source") if isinstance(metadata.get("auth_source"), Mapping) else metadata
+    source = str(auth.get("type") or auth.get("source") or "none").strip().lower()
+    if source not in WEB_AUTH_SOURCES:
+        source = "none"
+    result: dict[str, Any] = {"type": source}
+    for key in ("cookie_file", "header_file", "storage_state", "env"):
+        if auth.get(key):
+            result[key] = str(auth.get(key))
+    return result
+
+
+def _normalize_web_auth_source(
+    auth_source: str | None,
+    *,
+    cookie_file: str | Path | None,
+    header_file: str | Path | None,
+    storage_state: str | Path | None,
+    auth_env: str | None,
+    existing: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    source = str(auth_source or "").strip().lower()
+    if not source:
+        if cookie_file:
+            source = "cookie-file"
+        elif header_file:
+            source = "header-file"
+        elif storage_state:
+            source = "storage-state"
+        elif auth_env:
+            source = "env"
+        elif existing:
+            source = str(existing.get("type") or "none")
+        else:
+            source = "none"
+    if source not in WEB_AUTH_SOURCES:
+        return {"status": "blocked", "reason": "invalid_auth_source"}
+    result: dict[str, Any] = {"status": "ok", "type": source}
+    if source == "cookie-file":
+        path = cookie_file or (existing or {}).get("cookie_file")
+        if not path:
+            return {"status": "blocked", "reason": "cookie_file_required"}
+        result["cookie_file"] = _display(Path(str(path)).expanduser())
+    elif source == "header-file":
+        path = header_file or (existing or {}).get("header_file")
+        if not path:
+            return {"status": "blocked", "reason": "header_file_required"}
+        result["header_file"] = _display(Path(str(path)).expanduser())
+    elif source == "storage-state":
+        path = storage_state or (existing or {}).get("storage_state")
+        if not path:
+            return {"status": "blocked", "reason": "storage_state_required"}
+        result["storage_state"] = _display(Path(str(path)).expanduser())
+    elif source == "env":
+        name = auth_env or (existing or {}).get("env")
+        if not name:
+            return {"status": "blocked", "reason": "auth_env_required"}
+        result["env"] = str(name)
+    return result
+
+
+def _web_base_url_from_context(context: Mapping[str, Any]) -> str:
+    metadata = context.get("web_metadata") if isinstance(context.get("web_metadata"), Mapping) else {}
+    if metadata.get("base_url"):
+        return str(metadata["base_url"])
+    return _web_base_url_from_endpoints(context.get("remote_endpoints") or [])
+
+
+def _web_base_url_from_endpoints(endpoints: Iterable[Any]) -> str:
+    for endpoint in endpoints:
+        text = str(endpoint or "").strip().rstrip(").,]")
+        if not text.startswith(("http://", "https://")):
+            continue
+        check = _validate_endpoint_url_syntax(text, label="base_url")
+        if check.get("allowed"):
+            return text.rstrip("/")
+    return ""
+
+
+def _web_config_warnings(root: Path, metadata: Mapping[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    base_url = str(metadata.get("base_url") or "")
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+    except ValueError:
+        return ["web_base_url_invalid"]
+    if parsed.scheme == "http" and _service_host_locality(parsed.hostname or "") == "public":
+        warnings.append("web_base_url_plain_http_public")
+    if parsed.query:
+        warnings.append("web_base_url_has_query")
+    profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+    if profile_path and profile_path != "TODO":
+        loaded = load_config_metadata(_expand_display_path(profile_path))
+        data = loaded.get("data") if isinstance(loaded.get("data"), Mapping) else {}
+        profile_base = str(data.get("base_url") or data.get("url") or "")
+        if profile_base and _url_origin(profile_base) != _url_origin(base_url):
+            warnings.append("web_base_url_origin_differs_from_platform_profile_origin")
+    return sorted(set(warnings))
+
+
+def _web_auth_source_present(root: Path, metadata: Mapping[str, Any]) -> bool:
+    auth = _web_public_auth_source(metadata)
+    source = str(auth.get("type") or "none")
+    if source == "none":
+        return False
+    if source == "profile":
+        profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+        if not profile_path or profile_path == "TODO":
+            return False
+        metadata = load_auth_metadata(_expand_display_path(profile_path))
+        return bool(metadata.get("usable") or metadata.get("effective_method"))
+    if source == "cookie-file":
+        return bool(auth.get("cookie_file") and _undisplay_path(str(auth["cookie_file"])).exists())
+    if source == "header-file":
+        return bool(auth.get("header_file") and _undisplay_path(str(auth["header_file"])).exists())
+    if source == "storage-state":
+        return bool(auth.get("storage_state") and _undisplay_path(str(auth["storage_state"])).exists())
+    if source == "env":
+        return bool(auth.get("env") and str(auth["env"]) in os.environ)
+    return False
+
+
+def _web_live_headers(root: Path, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    auth = _web_public_auth_source(metadata)
+    source = str(auth.get("type") or "none")
+    base_url = str(metadata.get("base_url") or "")
+    try:
+        if source == "none":
+            return {"status": "ok", "headers": {}}
+        if source == "profile":
+            profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+            if not profile_path or profile_path == "TODO":
+                return {"status": "blocked", "reason": "profile_missing_for_web_auth"}
+            secret = load_auth_secret(_expand_display_path(profile_path), live=True)
+            return {"status": "ok", "headers": secret.build_headers(base_url=base_url)}
+        if source == "cookie-file":
+            path = _undisplay_path(str(auth.get("cookie_file") or ""))
+            if not path.exists():
+                return {"status": "blocked", "reason": "cookie_file_missing"}
+            cookie = _web_normalize_cookie_header(path.read_text(encoding="utf-8", errors="replace"))
+            return {"status": "ok", "headers": {"Cookie": cookie} if cookie else {}}
+        if source == "header-file":
+            path = _undisplay_path(str(auth.get("header_file") or ""))
+            if not path.exists():
+                return {"status": "blocked", "reason": "header_file_missing"}
+            return {"status": "ok", "headers": _read_web_header_file(path)}
+        if source == "storage-state":
+            path = _undisplay_path(str(auth.get("storage_state") or ""))
+            if not path.exists():
+                return {"status": "blocked", "reason": "storage_state_missing"}
+            cookie = _web_storage_state_cookie_header(path, base_url=base_url)
+            return {"status": "ok", "headers": {"Cookie": cookie} if cookie else {}}
+        if source == "env":
+            name = str(auth.get("env") or "")
+            if not name or name not in os.environ:
+                return {"status": "blocked", "reason": "auth_env_missing"}
+            return {"status": "ok", "headers": _web_headers_from_text(os.environ.get(name, ""))}
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        return {"status": "blocked", "reason": _web_safe_text(str(exc), limit=160)}
+    return {"status": "blocked", "reason": "auth_source_not_supported"}
+
+
+def _web_normalize_cookie_header(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("cookie:"):
+        text = text.split(":", 1)[1].strip()
+    parts: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.lower().startswith("cookie:"):
+            line = line.split(":", 1)[1].strip()
+        if ";" in line and "=" in line:
+            parts.extend(part.strip() for part in line.split(";") if part.strip())
+        elif "=" in line:
+            parts.append(line)
+    return "; ".join(parts) if parts else re.sub(r"[\r\n]+", "; ", text)
+
+
+def _read_web_header_file(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return {}
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        loaded = None
+    if isinstance(loaded, Mapping):
+        return _safe_request_headers({str(key): str(value) for key, value in loaded.items()})
+    return _web_headers_from_text(text)
+
+
+def _web_headers_from_text(text: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    stripped = str(text or "").strip()
+    if not stripped:
+        return headers
+    try:
+        loaded = json.loads(stripped)
+    except json.JSONDecodeError:
+        loaded = None
+    if isinstance(loaded, Mapping):
+        return _safe_request_headers({str(key): str(value) for key, value in loaded.items()})
+    if "\n" in stripped or ":" in stripped:
+        for line in stripped.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip()] = value.strip()
+        return _safe_request_headers(headers)
+    if "=" in stripped:
+        return {"Cookie": _web_normalize_cookie_header(stripped)}
+    return {"Authorization": f"Bearer {stripped}"}
+
+
+def _safe_request_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    blocked = {"host", "content-length", "transfer-encoding", "connection"}
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        name = str(key).strip()
+        if not name or name.lower() in blocked:
+            continue
+        result[name] = str(value)
+    return result
+
+
+def _web_storage_state_cookie_header(path: Path, *, base_url: str) -> str:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    cookies = state.get("cookies") if isinstance(state, Mapping) else []
+    if not isinstance(cookies, list):
+        return ""
+    host = urllib.parse.urlsplit(base_url).hostname or ""
+    values: list[str] = []
+    for cookie in cookies:
+        if not isinstance(cookie, Mapping):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        value = str(cookie.get("value") or "").strip()
+        domain = str(cookie.get("domain") or "").lstrip(".").lower()
+        if not name or not value:
+            continue
+        if host and domain and host.lower() != domain and not host.lower().endswith("." + domain):
+            continue
+        values.append(f"{name}={value}")
+    return "; ".join(values)
+
+
+def _web_fetch(url: str, *, headers: Mapping[str, str], timeout: int) -> dict[str, Any]:
+    return _web_request("GET", url, headers=headers, body=None, timeout=timeout)
+
+
+def _web_request(
+    method: str,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    body: bytes | None,
+    timeout: int,
+) -> dict[str, Any]:
+    request_headers = {
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "User-Agent": "dding-ctf-runner-web-harness/0.1",
+        **dict(headers),
+    }
+    request = urllib.request.Request(url, data=body, headers=request_headers, method=method.upper())
+    start = time.perf_counter()
+    raw = b""
+    response_headers: dict[str, str] = {}
+    final_url = url
+    status_code: int | None = None
+    status = "error"
+    error = ""
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - operator-configured challenge URL.
+            raw = response.read(WEB_RESPONSE_LIMIT + 1)
+            if len(raw) > WEB_RESPONSE_LIMIT:
+                raw = raw[:WEB_RESPONSE_LIMIT]
+            final_url = str(getattr(response, "url", "") or response.geturl() or url)
+            status_code = int(getattr(response, "status", 0) or getattr(response, "code", 0) or 200)
+            response_headers = {str(key): str(value) for key, value in response.headers.items()}
+            status = "ok" if status_code < 400 else "http_error"
+    except urllib.error.HTTPError as exc:
+        status_code = int(exc.code)
+        final_url = str(getattr(exc, "url", "") or url)
+        response_headers = {str(key): str(value) for key, value in (exc.headers.items() if exc.headers else [])}
+        try:
+            raw = exc.read(WEB_RESPONSE_LIMIT + 1)
+        except Exception:
+            raw = b""
+        if len(raw) > WEB_RESPONSE_LIMIT:
+            raw = raw[:WEB_RESPONSE_LIMIT]
+        status = "http_error"
+        error = f"http_error_{status_code}"
+    except urllib.error.URLError as exc:
+        status = "network_error"
+        error = _web_safe_text(str(getattr(exc, "reason", exc)), limit=300)
+    except OSError as exc:
+        status = "error"
+        error = _web_safe_text(str(exc), limit=300)
+    content_type = response_headers.get("Content-Type") or response_headers.get("content-type") or ""
+    text = _web_decode_body(raw, content_type)
+    return {
+        "client": "urllib.request",
+        "status": status,
+        "http_status": status_code,
+        "final_url": final_url,
+        "content_type": content_type,
+        "headers": response_headers,
+        "body": text,
+        "body_len": len(text),
+        "body_sha256": hashlib.sha256(raw).hexdigest() if raw else "",
+        "runtime_sec": round(time.perf_counter() - start, 3),
+        "error": error,
+    }
+
+
+def _web_decode_body(raw: bytes, content_type: str) -> str:
+    match = re.search(r"charset=([A-Za-z0-9_.-]+)", str(content_type or ""), re.IGNORECASE)
+    encoding = match.group(1) if match else "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
+def _parse_web_probe_response(response: Mapping[str, Any], base_url: str) -> dict[str, Any]:
+    body = str(response.get("body") or "")
+    parser = _WebProbeParser()
+    if body:
+        try:
+            parser.feed(body[:WEB_TEXT_SCAN_LIMIT])
+        except Exception:
+            pass
+    forms = [_web_form_summary(row, base_url) for row in parser.forms[:40]]
+    links = [_web_url_summary(row.get("href", ""), base_url, tag=row.get("tag", ""), text=row.get("text", "")) for row in parser.links[:120]]
+    scripts = [_web_script_summary(row, base_url) for row in parser.scripts[:80]]
+    static_links = [
+        row
+        for row in [*links, *scripts]
+        if str(row.get("kind") or "") in {"script", "stylesheet", "image", "asset"} or Path(str(row.get("path") or "")).suffix.lower() in {".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".wasm"}
+    ][:80]
+    endpoints = _web_endpoint_candidates(body, base_url, forms=forms, links=links, scripts=scripts)
+    return {
+        "title": parser.title,
+        "forms": forms,
+        "links": links[:80],
+        "scripts": scripts,
+        "static_links": static_links,
+        "endpoint_candidates": endpoints,
+    }
+
+
+def _web_form_summary(form: Mapping[str, Any], base_url: str) -> dict[str, Any]:
+    action = str(form.get("action") or "")
+    resolved = urllib.parse.urljoin(base_url.rstrip("/") + "/", action or ".")
+    inputs = form.get("inputs") if isinstance(form.get("inputs"), list) else []
+    return {
+        "method": str(form.get("method") or "GET").upper(),
+        "action_path": _web_url_path(resolved),
+        "action_hash": hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16],
+        "id": _web_safe_text(str(form.get("id") or ""), limit=80),
+        "name": _web_safe_text(str(form.get("name") or ""), limit=80),
+        "inputs": [
+            {
+                "tag": str(item.get("tag") or ""),
+                "name": _web_safe_text(str(item.get("name") or ""), limit=80),
+                "type": _web_safe_text(str(item.get("type") or ""), limit=40),
+                "id": _web_safe_text(str(item.get("id") or ""), limit=80),
+            }
+            for item in inputs[:40]
+            if isinstance(item, Mapping)
+        ],
+    }
+
+
+def _web_url_summary(raw_url: str, base_url: str, *, tag: str, text: str = "") -> dict[str, Any]:
+    resolved = urllib.parse.urljoin(base_url.rstrip("/") + "/", str(raw_url or ""))
+    path = _web_url_path(resolved)
+    suffix = Path(urllib.parse.urlsplit(resolved).path).suffix.lower()
+    kind = "link"
+    if tag == "script" or suffix == ".js":
+        kind = "script"
+    elif suffix == ".css" or tag == "link":
+        kind = "stylesheet" if suffix == ".css" else "asset"
+    elif suffix in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp"}:
+        kind = "image"
+    elif suffix:
+        kind = "asset"
+    return {
+        "tag": tag,
+        "kind": kind,
+        "path": path,
+        "same_origin": _same_url_origin(base_url, resolved),
+        "url_hash": hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16],
+        "text": _web_safe_text(text, limit=120) if text else "",
+    }
+
+
+def _web_script_summary(script: Mapping[str, str], base_url: str) -> dict[str, Any]:
+    src = str(script.get("src") or "")
+    text = str(script.get("text") or "")
+    if src:
+        return {**_web_url_summary(src, base_url, tag="script"), "type": _web_safe_text(str(script.get("type") or ""), limit=80), "inline_size": 0, "inline_sha256": ""}
+    return {
+        "tag": "script",
+        "kind": "script",
+        "path": "inline",
+        "same_origin": True,
+        "url_hash": "",
+        "type": _web_safe_text(str(script.get("type") or ""), limit=80),
+        "inline_size": len(text),
+        "inline_sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16] if text else "",
+    }
+
+
+def _web_endpoint_candidates(
+    body: str,
+    base_url: str,
+    *,
+    forms: list[dict[str, Any]],
+    links: list[dict[str, Any]],
+    scripts: list[dict[str, Any]],
+) -> list[str]:
+    candidates: list[str] = []
+    for row in forms:
+        path = str(row.get("action_path") or "")
+        if path:
+            candidates.append(path)
+    for row in links:
+        path = str(row.get("path") or "")
+        if path and re.search(r"(?i)(api|graphql|login|auth|admin|upload|download|search|flag|check)", path):
+            candidates.append(path)
+    for match in re.finditer(r"""(?:(?:fetch|axios\.(?:get|post)|XMLHttpRequest|open)\s*\(?\s*|["'`])((?:https?://|/)[^"'`<>\s)]+)""", body[:WEB_TEXT_SCAN_LIMIT]):
+        raw = match.group(1).rstrip(".,;)")
+        if raw:
+            candidates.append(_web_url_path(urllib.parse.urljoin(base_url.rstrip("/") + "/", raw)))
+    for row in scripts:
+        path = str(row.get("path") or "")
+        if path and path != "inline":
+            candidates.append(path)
+    return _dedupe_strings(candidates)[:80]
+
+
+def _web_headers_summary(headers: Mapping[str, Any]) -> dict[str, Any]:
+    lowered = {str(key).lower(): str(value) for key, value in headers.items()}
+    content_length = _int_value(lowered.get("content-length"))
+    names = sorted(key for key in lowered if key not in {"set-cookie", "cookie", "authorization"})
+    return {
+        "content_type": lowered.get("content-type", "").split(";", 1)[0],
+        "content_length": content_length,
+        "header_names": names[:80],
+        "set_cookie_present": "set-cookie" in lowered,
+        "server_present": bool(lowered.get("server")),
+        "cache_control": _web_safe_text(lowered.get("cache-control", ""), limit=120),
+    }
+
+
+def _web_probe_error_record(
+    contest_id: str,
+    challenge_id: str,
+    metadata: Mapping[str, Any],
+    *,
+    started_at: str,
+    timeout: int,
+    status: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "interactive_web_probe_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_id,
+        "started_at": started_at,
+        "completed_at": utc_now(),
+        "timeout_sec": timeout,
+        "base_url": _web_public_url(str(metadata.get("base_url") or "")),
+        "auth_source": _web_public_auth_source(metadata),
+        "status": status,
+        "http_status": None,
+        "title": "",
+        "forms": [],
+        "links": [],
+        "scripts": [],
+        "static_links": [],
+        "endpoint_candidates": [],
+        "headers_summary": {},
+        "body_len": 0,
+        "body_sha256": "",
+        "error": _web_safe_text(reason, limit=300),
+    }
+
+
+def _web_probe_public_result(record: Mapping[str, Any], probe_path: Path) -> dict[str, Any]:
+    return {
+        "status": record.get("status") or "error",
+        "contest_id": record.get("contest_id"),
+        "challenge_id": record.get("challenge_id"),
+        "base_url": record.get("base_url") or "",
+        "http_status": record.get("http_status"),
+        "title": record.get("title") or "",
+        "forms": record.get("forms") or [],
+        "links": record.get("links") or [],
+        "scripts": record.get("scripts") or [],
+        "static_links": record.get("static_links") or [],
+        "endpoint_candidates": record.get("endpoint_candidates") or [],
+        "headers_summary": record.get("headers_summary") or {},
+        "probe_path": _display(probe_path),
+        "error": record.get("error") or "",
+    }
+
+
+def _web_browser_capture(
+    root: Path,
+    metadata: Mapping[str, Any],
+    *,
+    screenshot_path: Path,
+    timeout: int,
+    kind: str,
+) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:  # noqa: BLE001 - browser support is optional.
+        return {
+            "status": "unavailable",
+            "reason": "playwright_unavailable",
+            "browser_error_type": exc.__class__.__name__,
+            "title": "",
+            "final_url": "",
+            "final_path": "",
+            "screenshot_path": "",
+            "console_summary": [],
+            "network_summary": [],
+            "blocked_requests": [],
+            "error": _web_safe_text(str(exc), limit=300),
+        }
+    context_options = _web_browser_context_options(root, metadata)
+    if context_options.get("status") != "ok":
+        return {
+            "status": "blocked",
+            "reason": context_options.get("reason") or "auth_context_unavailable",
+            "title": "",
+            "final_url": "",
+            "final_path": "",
+            "screenshot_path": "",
+            "console_summary": [],
+            "network_summary": [],
+            "blocked_requests": [],
+            "error": str(context_options.get("reason") or ""),
+        }
+    base_url = str(metadata.get("base_url") or "")
+    console: list[dict[str, Any]] = []
+    network: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    browser = None
+    context = None
+    launched = False
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            launched = True
+            context = browser.new_context(**dict(context_options.get("options") or {}))
+
+            def route_handler(route: Any, request: Any) -> None:
+                should_block, reason = _web_should_block_browser_request(str(request.method), str(request.url))
+                if should_block:
+                    blocked.append({"method": str(request.method).upper(), "path": _web_url_path(str(request.url)), "reason": reason})
+                    route.abort()
+                    return
+                route.continue_()
+
+            context.route("**/*", route_handler)
+            page = context.new_page()
+
+            def console_handler(message: Any) -> None:
+                if len(console) >= WEB_BROWSER_CONSOLE_LIMIT:
+                    return
+                console.append({"type": str(getattr(message, "type", "") or ""), "text": _web_auth_sanitize_text(str(message.text))[:500]})
+
+            def response_handler(response: Any) -> None:
+                if len(network) >= WEB_BROWSER_NETWORK_LIMIT:
+                    return
+                headers = response.headers or {}
+                network.append(
+                    {
+                        "method": str(response.request.method).upper(),
+                        "path": _web_url_path(str(response.url)),
+                        "status": int(response.status),
+                        "content_type": str(headers.get("content-type") or "").split(";", 1)[0],
+                    }
+                )
+
+            page.on("console", console_handler)
+            page.on("response", response_handler)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=max(1, timeout) * 1000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(5000, max(1000, timeout * 1000 // 3)))
+            except PlaywrightTimeoutError:
+                pass
+            title = _web_auth_sanitize_text(page.title())[:300]
+            final_url = str(page.url)
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            context.close()
+            browser.close()
+            return {
+                "status": "ok",
+                "kind": kind,
+                "auth_context": context_options.get("metadata") or {},
+                "title": title,
+                "final_url": _web_public_url(final_url),
+                "final_path": _web_url_path(final_url),
+                "screenshot_path": _display(screenshot_path),
+                "console_summary": console,
+                "network_summary": network,
+                "blocked_requests": blocked,
+                "error": "",
+            }
+    except Exception as exc:  # noqa: BLE001 - probes should fail closed and preserve summaries.
+        status = "error" if launched else "unavailable"
+        reason = "" if launched else "playwright_unavailable"
+        return {
+            "status": status,
+            "reason": reason,
+            "kind": kind,
+            "auth_context": context_options.get("metadata") or {},
+            "title": "",
+            "final_url": "",
+            "final_path": "",
+            "screenshot_path": _display(screenshot_path) if screenshot_path.exists() else "",
+            "console_summary": console,
+            "network_summary": network,
+            "blocked_requests": blocked,
+            "error": _web_safe_text(str(exc), limit=300),
+            "browser_error_type": exc.__class__.__name__,
+        }
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+def _web_browser_context_options(root: Path, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    auth = _web_public_auth_source(metadata)
+    source = str(auth.get("type") or "none")
+    if source == "storage-state":
+        path = _undisplay_path(str(auth.get("storage_state") or ""))
+        if not path.exists():
+            return {"status": "blocked", "reason": "storage_state_missing"}
+        return {"status": "ok", "options": {"storage_state": str(path)}, "metadata": {"auth_source_type": source, "storage_state_path": _display(path)}}
+    if source == "profile":
+        profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+        if profile_path and profile_path != "TODO":
+            meta = load_auth_metadata(_expand_display_path(profile_path))
+            if meta.get("effective_method") == "storage_state_file" and meta.get("path"):
+                path = _undisplay_path(str(meta.get("path") or ""))
+                if path.exists():
+                    return {"status": "ok", "options": {"storage_state": str(path)}, "metadata": {"auth_source_type": source, "storage_state_path": _display(path)}}
+    headers = _web_live_headers(root, metadata)
+    if headers.get("status") != "ok":
+        return {"status": "blocked", "reason": headers.get("reason") or "auth_source_unavailable"}
+    request_headers = dict(headers.get("headers") or {})
+    request_headers.setdefault("User-Agent", "dding-ctf-runner-web-harness/0.1")
+    return {
+        "status": "ok",
+        "options": {"extra_http_headers": request_headers} if request_headers else {},
+        "metadata": {
+            "auth_source_type": source,
+            "header_names": sorted(key for key in request_headers if key.lower() not in {"cookie", "authorization"}),
+            "cookie_header_present": any(key.lower() == "cookie" for key in request_headers),
+            "authorization_header_present": any(key.lower() == "authorization" for key in request_headers),
+        },
+    }
+
+
+def _browser_probe_public_result(record: Mapping[str, Any], probe_path: Path) -> dict[str, Any]:
+    return {
+        "status": record.get("status") or "error",
+        "contest_id": record.get("contest_id"),
+        "challenge_id": record.get("challenge_id"),
+        "base_url": record.get("base_url") or "",
+        "title": record.get("title") or "",
+        "final_url": record.get("final_url") or "",
+        "screenshot_path": record.get("screenshot_path") or "",
+        "console_summary": record.get("console_summary") or [],
+        "network_summary": record.get("network_summary") or [],
+        "blocked_requests": record.get("blocked_requests") or [],
+        "probe_path": _display(probe_path),
+        "reason": record.get("reason") or "",
+        "error": record.get("error") or "",
+    }
+
+
+def _web_should_block_browser_request(method: str, url: str) -> tuple[bool, str]:
+    if str(method).upper() not in {"GET", "HEAD"}:
+        return True, "non_get_head_blocked"
+    path = urllib.parse.urlsplit(str(url)).path.lower()
+    destructive = ("attempt", "submit", "submission", "start", "instance", "deploy", "reset", "delete", "logout", "register", "password", "admin")
+    if any(token in path for token in destructive):
+        return True, "destructive_path_blocked"
+    return False, ""
+
+
+def _run_web_request_json(
+    request_json: str | Path,
+    *,
+    root: Path,
+    challenge_dir: Path,
+    metadata: Mapping[str, Any],
+    timeout: int,
+) -> dict[str, Any]:
+    path = Path(request_json).expanduser()
+    if not path.is_absolute():
+        path = challenge_dir / path
+    if not path.exists():
+        return {"status": "blocked", "reason": "request_json_not_found"}
+    try:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "blocked", "reason": _web_safe_text(str(exc), limit=160)}
+    if not isinstance(spec, Mapping):
+        return {"status": "blocked", "reason": "request_json_must_be_object"}
+    method = str(spec.get("method") or "GET").upper()
+    if not re.fullmatch(r"[A-Z]{3,8}", method):
+        return {"status": "blocked", "reason": "request_method_invalid"}
+    base_url = str(metadata.get("base_url") or "")
+    url = str(spec.get("url") or "").strip()
+    if not url:
+        raw_path = str(spec.get("path") or "/")
+        url = urllib.parse.urljoin(base_url.rstrip("/") + "/", raw_path.lstrip("/"))
+    check = _validate_endpoint_url_syntax(url, label="request_url")
+    if not check.get("allowed"):
+        return {"status": "blocked", "reason": check.get("reason") or "request_url_invalid"}
+    auth = _web_live_headers(root, metadata)
+    if auth.get("status") != "ok":
+        return {"status": "blocked", "reason": auth.get("reason") or "auth_source_unavailable"}
+    headers = dict(auth.get("headers") or {})
+    if isinstance(spec.get("headers"), Mapping):
+        headers.update(_safe_request_headers({str(key): str(value) for key, value in spec["headers"].items()}))
+    body: bytes | None = None
+    if "json" in spec:
+        body = json.dumps(spec.get("json"), sort_keys=True).encode("utf-8")
+        headers.setdefault("Content-Type", "application/json")
+    elif "body" in spec:
+        body = str(spec.get("body") or "").encode("utf-8")
+    start = time.perf_counter()
+    response = _web_request(method, url, headers=headers, body=body, timeout=timeout)
+    runtime_sec = round(time.perf_counter() - start, 3)
+    stdout = str(response.get("body") or "")
+    return {
+        "status": "ok",
+        "command": f"request-json {shlex.quote(_display(path))}",
+        "stdout": stdout,
+        "stderr": "",
+        "returncode": 0 if str(response.get("status")) == "ok" else 1,
+        "runtime_sec": runtime_sec,
+        "timed_out": False,
+        "response": {
+            "status": response.get("status"),
+            "http_status": response.get("http_status"),
+            "final_url": _web_public_url(str(response.get("final_url") or "")),
+            "final_path": _web_url_path(str(response.get("final_url") or url)),
+            "content_type": response.get("content_type") or "",
+            "body_len": response.get("body_len") or 0,
+            "body_sha256": response.get("body_sha256") or "",
+            "header_names": sorted(key for key in headers if key.lower() not in {"cookie", "authorization"}),
+            "auth_header_present": any(key.lower() in {"cookie", "authorization"} for key in headers),
+        },
+        "error": response.get("error") or "",
+    }
+
+
+def _run_web_attempt_script(
+    script: str | Path | None,
+    *,
+    root: Path,
+    challenge_dir: Path,
+    contest_id: str,
+    challenge_id: str,
+    metadata: Mapping[str, Any],
+    timeout: int,
+) -> dict[str, Any]:
+    if not script:
+        return {"status": "blocked", "reason": "script_or_request_json_required"}
+    return _run_script_with_env(
+        script,
+        challenge_dir=challenge_dir,
+        env_updates=_web_script_env(root, contest_id=contest_id, challenge_id=challenge_id, metadata=metadata),
+        timeout=timeout,
+    )
+
+
+def _run_script_with_env(
+    script: str | Path,
+    *,
+    challenge_dir: Path,
+    env_updates: Mapping[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    path = Path(script).expanduser()
+    if not path.is_absolute():
+        path = challenge_dir / path
+    if not path.exists():
+        return {"status": "blocked", "reason": "script_not_found"}
+    env = os.environ.copy()
+    env.update({str(key): str(value) for key, value in env_updates.items() if value is not None})
+    command = _script_argv(path)
+    start = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=challenge_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "status": "ok",
+            "command": " ".join(shlex.quote(part) for part in command),
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+            "returncode": int(completed.returncode),
+            "runtime_sec": round(time.perf_counter() - start, 3),
+            "timed_out": False,
+            "error": "",
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "ok",
+            "command": " ".join(shlex.quote(part) for part in command),
+            "stdout": _process_output_text(exc.stdout),
+            "stderr": _process_output_text(exc.stderr),
+            "returncode": None,
+            "runtime_sec": round(time.perf_counter() - start, 3),
+            "timed_out": True,
+            "error": "timeout",
+        }
+    except OSError as exc:
+        return {"status": "blocked", "reason": _web_safe_text(str(exc), limit=160)}
+
+
+def _web_script_env(root: Path, *, contest_id: str, challenge_id: str, metadata: Mapping[str, Any]) -> dict[str, str]:
+    auth = _web_public_auth_source(metadata)
+    env = {
+        "CTF_CONTEST_ID": contest_id,
+        "CTF_CHALLENGE_ID": challenge_id,
+        "CTF_OPERATOR_ROOT": _display(root),
+        "CTF_WEB_BASE_URL": str(metadata.get("base_url") or ""),
+        "CTF_WEB_AUTH_SOURCE": str(auth.get("type") or "none"),
+    }
+    if auth.get("cookie_file"):
+        env["CTF_WEB_COOKIE_FILE"] = str(auth["cookie_file"])
+    if auth.get("header_file"):
+        env["CTF_WEB_HEADER_FILE"] = str(auth["header_file"])
+    if auth.get("storage_state"):
+        env["CTF_WEB_STORAGE_STATE"] = str(auth["storage_state"])
+    if auth.get("env"):
+        env["CTF_WEB_AUTH_ENV"] = str(auth["env"])
+    profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+    if profile_path and profile_path != "TODO":
+        env["CTF_WEB_PROFILE"] = profile_path
+    return env
+
+
+def _web_metric_payload(metadata: Mapping[str, Any], *, status: str, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    base_url = str(metadata.get("base_url") or "")
+    payload = {
+        "status": status,
+        "base_url_origin": _url_origin(base_url) if base_url else "",
+        "base_url_path": _web_url_path(base_url) if base_url else "",
+        "base_url_locality": _service_host_locality(urllib.parse.urlsplit(base_url).hostname or "") if base_url else "",
+        "auth_source_type": (_web_public_auth_source(metadata).get("type") or "none"),
+    }
+    if extra:
+        payload.update(dict(extra))
+    return payload
+
+
+def _last_web_record(directory: Path) -> dict[str, Any]:
+    if not directory.exists():
+        return {}
+    paths = sorted(directory.glob("*.json"))
+    if not paths:
+        return {}
+    record = _read_json_file(paths[-1])
+    if record:
+        record["_path"] = _display(paths[-1])
+    return record
+
+
+def _web_record_summary(record: Mapping[str, Any]) -> dict[str, Any]:
+    if not record:
+        return {}
+    return {
+        "path": record.get("_path") or "",
+        "status": record.get("status") or "",
+        "completed_at": record.get("completed_at") or "",
+        "http_status": record.get("http_status"),
+        "title": record.get("title") or "",
+        "candidate_count": _int_value(record.get("candidate_count")) or 0,
+        "screenshot_present": _record_has_screenshot(record),
+    }
+
+
+def _record_has_screenshot(record: Mapping[str, Any]) -> bool:
+    path = str(record.get("screenshot_path") or "")
+    return bool(path and _undisplay_path(path).exists())
+
+
+def _existing_artifact_path(path: Path) -> str:
+    return _display(path) if path.exists() and path.is_file() else ""
+
+
+def _web_artifact_console_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in rows[:WEB_BROWSER_CONSOLE_LIMIT]:
+        result.append(
+            {
+                "type": _web_safe_text(str(row.get("type") or ""), limit=60),
+                "text": _web_auth_sanitize_text(str(row.get("text") or row.get("message") or ""))[:500],
+            }
+        )
+    return result
+
+
+def _web_artifact_network_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in rows[:WEB_BROWSER_NETWORK_LIMIT]:
+        url = str(row.get("url") or row.get("path") or "")
+        result.append(
+            {
+                "method": str(row.get("method") or "GET").upper(),
+                "path": _web_url_path(url) if url else "",
+                "status": _int_value(row.get("status")),
+                "content_type": _web_safe_text(str(row.get("content_type") or ""), limit=100),
+            }
+        )
+    return result
+
+
+def _jsonl_text_for_candidate_scan(rows: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for row in rows[:200]:
+        for key in ("text", "message", "body", "response", "candidate"):
+            if row.get(key):
+                parts.append(str(row.get(key)))
+    return "\n".join(parts)
+
+
+def _starter_looks_browser_based(path: Path) -> bool:
+    try:
+        if path.stat().st_size > 256 * 1024:
+            return path.name in {"solve_browser.py", "browser_solve.py"}
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return path.name in {"solve_browser.py", "browser_solve.py"} or "sync_playwright" in text or "async_playwright" in text
+
+
+def _web_public_url(url: str) -> str:
+    return redact_text(str(url or ""))
+
+
+def _web_url_path(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+    except ValueError:
+        return ""
+    return parsed.path or "/"
+
+
+def _web_safe_text(value: str, *, limit: int) -> str:
+    return _service_sanitize_text(str(value or "")).replace("\n", " ")[:limit]
+
+
+def _web_auth_sanitize_text(value: str) -> str:
+    return _service_sanitize_text(str(value or ""))
+
+
 def _save_challenge_local_metadata(
     root: Path,
     board: dict[str, Any],
@@ -6834,6 +8691,7 @@ def _starter_context_data(
         "primary_file": primary,
         "remote_endpoints": [str(value) for value in context.get("remote_endpoints") or []],
         "service_metadata": _service_public_metadata(context.get("service_metadata") or {}) if context.get("service_metadata") else {},
+        "web_metadata": _web_public_metadata(context.get("web_metadata") or {}) if context.get("web_metadata") else {},
         "available_tools": list(toolchain.get("available_tools") or []),
         "missing_critical_tools": list(toolchain.get("missing_critical_tools") or []),
         "recommended_fallbacks": list(toolchain.get("recommended_fallbacks") or []),
@@ -6869,6 +8727,9 @@ REMOTE_ENDPOINTS = {_py_json(data["remote_endpoints"])}
 SERVICE_METADATA = {_py_json(data["service_metadata"])}
 SERVICE_ENDPOINT = SERVICE_METADATA.get("endpoint", {{}})
 SERVICE_TOKEN_SOURCE = SERVICE_METADATA.get("token_source", {{"type": "none"}})
+WEB_METADATA = {_py_json(data["web_metadata"])}
+WEB_BASE_URL = WEB_METADATA.get("base_url", "")
+WEB_AUTH_SOURCE = WEB_METADATA.get("auth_source", {{"type": "none"}})
 PRIMARY_FILE = Path({json.dumps(data["primary_file"])}) if {json.dumps(bool(data["primary_file"]))} else None
 AVAILABLE_TOOLS = {_py_json(data["available_tools"])}
 MISSING_CRITICAL_TOOLS = {_py_json(data["missing_critical_tools"])}
@@ -6878,7 +8739,8 @@ RECOMMENDED_FALLBACKS = {_py_json(data["recommended_fallbacks"])}
 
 
 def _starter_web_source(data: Mapping[str, Any]) -> str:
-    return _starter_header(data) + '''import re
+    return _starter_header(data) + '''import os
+import re
 import sys
 import urllib.request
 
@@ -6899,6 +8761,11 @@ def read_text(path: Path, limit: int = 20000) -> str:
 
 
 def candidate_base_url() -> str:
+    env_url = os.environ.get("CTF_WEB_BASE_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    if WEB_BASE_URL:
+        return str(WEB_BASE_URL).rstrip("/")
     if SERVICE_ENDPOINT.get("host") and SERVICE_ENDPOINT.get("port"):
         scheme = "https" if SERVICE_ENDPOINT.get("transport") == "tls" else "http"
         return f"{scheme}://{SERVICE_ENDPOINT['host']}:{SERVICE_ENDPOINT['port']}"
@@ -6908,22 +8775,47 @@ def candidate_base_url() -> str:
     return ""
 
 
+def session_headers() -> dict[str, str]:
+    # ctfctl web-attempt passes auth source paths/env names, not raw secret values.
+    return {}
+
+
+def optional_browser_probe(base_url: str) -> None:
+    # Optional Playwright hook for DOM-only bugs. Run this file through
+    # browser-attempt after replacing the TODO body with a real action path.
+    if not os.environ.get("CTF_BROWSER_SCREENSHOT"):
+        return
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(base_url, wait_until="domcontentloaded", timeout=10000)
+        page.screenshot(path=os.environ["CTF_BROWSER_SCREENSHOT"], full_page=True)
+        browser.close()
+
+
 def main() -> int:
     base_url = candidate_base_url()
     if not base_url:
-        print("TODO: set base_url from challenge statement or local service.", file=sys.stderr)
+        print("TODO: run ctfctl interactive web-config with --base-url or set CTF_WEB_BASE_URL.", file=sys.stderr)
         return 1
 
     # TODO: map route/auth state from TOP_FILES and replace this probe.
     if requests is not None:
         session = requests.Session()
+        session.headers.update(session_headers())
         response = session.get(base_url, timeout=10)
         print(response.status_code)
         body = response.text
     else:
-        with urllib.request.urlopen(base_url, timeout=10) as response:
+        request = urllib.request.Request(base_url, headers=session_headers(), method="GET")
+        with urllib.request.urlopen(request, timeout=10) as response:
             print(response.status)
             body = response.read().decode("utf-8", errors="replace")
+    optional_browser_probe(base_url)
     match = FLAG_RE.search(body)
     if match:
         print(match.group(0))
@@ -7258,6 +9150,24 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
         )
     else:
         lines.append("- none configured")
+    web_metadata = context.get("web_metadata") if isinstance(context.get("web_metadata"), Mapping) else {}
+    web = _web_public_metadata(web_metadata) if web_metadata else {}
+    lines.extend(["", "## Web"])
+    if web.get("base_url"):
+        lines.extend(
+            [
+                f"- base_url: {_md(str(web.get('base_url') or ''))}",
+                f"- base_url_source: {_md(str(web.get('base_url_source') or ''))}",
+                f"- auth_source: {_md(str((web.get('auth_source') or {}).get('type') or 'none'))}",
+                f"- warning_count: {len(web.get('warnings') or [])}",
+                f"- status_command: `ctfctl interactive web-status --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --json`",
+                f"- probe_command: `ctfctl interactive web-probe --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --json`",
+                f"- browser_probe_command: `ctfctl interactive browser-probe --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --json`",
+                f"- attempt_command: `ctfctl interactive web-attempt --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --script solve_web.py --json`",
+            ]
+        )
+    else:
+        lines.append("- none configured")
     lines.extend(["", "## Top Interesting Files"])
     if context["top_files"]:
         for entry in context["top_files"][:18]:
@@ -7357,6 +9267,29 @@ def _recommended_first_commands(item: Mapping[str, Any], context: Mapping[str, A
             + shlex.quote(str(context.get("contest_id") or "<contest>"))
             + " --challenge-id "
             + shlex.quote(str((context.get("service_metadata") or {}).get("challenge_id") or "<challenge>"))
+            + " --json"
+        )
+    if context.get("web_metadata"):
+        web_challenge = str((context.get("web_metadata") or {}).get("challenge_id") or "<challenge>")
+        commands.append(
+            "ctfctl interactive web-status --contest-id "
+            + shlex.quote(str(context.get("contest_id") or "<contest>"))
+            + " --challenge-id "
+            + shlex.quote(web_challenge)
+            + " --json"
+        )
+        commands.append(
+            "ctfctl interactive web-probe --contest-id "
+            + shlex.quote(str(context.get("contest_id") or "<contest>"))
+            + " --challenge-id "
+            + shlex.quote(web_challenge)
+            + " --json"
+        )
+        commands.append(
+            "ctfctl interactive browser-probe --contest-id "
+            + shlex.quote(str(context.get("contest_id") or "<contest>"))
+            + " --challenge-id "
+            + shlex.quote(web_challenge)
             + " --json"
         )
     if context.get("remote_endpoints"):
@@ -7894,7 +9827,7 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "total_events": len(contest_events),
         "sessions": len(sessions),
         "claimed_count": sum(1 for row in contest_events if row.get("event") == "claim"),
-        "attempt_count": sum(1 for row in contest_events if row.get("event") in {"attempt_completed", "service_attempt_completed"}),
+        "attempt_count": sum(1 for row in contest_events if row.get("event") in {"attempt_completed", "service_attempt_completed", "web_attempt_completed", "browser_attempt_completed"}),
         "solved_count": solved_count,
         "stalled_count": sum(1 for row in contest_events if row.get("event") == "stalled"),
         "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit") + artifact_attempted_count,
@@ -7978,7 +9911,7 @@ def _attempts_total(events: list[dict[str, Any]]) -> int | None:
     for row in events:
         event = str(row.get("event") or "")
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
-        if event in {"attempt", "attempts", "attempt_completed", "service_attempt_completed"}:
+        if event in {"attempt", "attempts", "attempt_completed", "service_attempt_completed", "web_attempt_completed", "browser_attempt_completed"}:
             total += 1
             seen = True
         value = data.get("attempts_total") or data.get("attempt_count")
