@@ -120,7 +120,7 @@ export AGENTS=4
 ./scripts/ctfctl preflight --deep --json
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
@@ -164,9 +164,9 @@ Each solver should:
 - move to the next challenge unless the user stops the loop, the contest ends, or all challenges are solved/external_solved/stalled-documented
 - keep self memos current to prevent context drift
 
-`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive next` and `interactive claim` return canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`. `interactive sync --json` also reports `new_count` and `updated_count`.
+`interactive sync` canonicalizes platform challenge rows before this loop starts. Static shell pages, `-static` slugs, case/spacing variants, and phase metadata are kept under the canonical row in `board.json` as `aliases`, `artifact_sources`, and `source_ids`. Default `interactive next` and `interactive claim` return canonical, claimable rows; `interactive board --json` exposes `canonical_count`, `alias_count`, `skipped_static_count`, and `claimable_count`. Use `interactive sync --pull-solved` when the platform exposes team solved/submission state. Platform solved IDs, aliases, or static names mark the canonical row `solved_by_platform` with `solved_source=platform`; sync JSON also reports `new_count`, `updated_count`, `solved_synced_count`, `external_solved_count`, `solved_alias_resolved_count`, and `solved_status_source`.
 
-No background refresh loop runs during a contest. New problems are picked up only when a visible Codex/operator command performs a refresh: `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`.
+No background refresh loop runs during a contest. New problems and teammate solves are picked up only when a visible Codex/operator command performs a refresh: `interactive sync --live --pull-solved`, `interactive next --refresh`, or `interactive prepare-target --refresh`. The refresh paths used by `next` and `prepare-target` pull solved status when available before ranking targets.
 
 ## 6. Interactive Commands
 
@@ -184,7 +184,7 @@ ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
 ```
 
-`next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear `next_steps`. It skips alias/static/artifact-source rows, solved/external-solved/stalled-documented challenges, and generic no-file shells. Use `--refresh --profile "$PROFILE"` to run one live sync before ranking; newly discovered challenges become claimable immediately and sync deltas are recorded in metrics. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
+`next` scores canonical challenges by attachments, remote endpoints, category confidence, existing progress, and clear `next_steps`. It skips alias/static/artifact-source rows, locally solved/platform-solved/external-solved/stalled-documented challenges, and generic no-file shells. Use `--refresh --profile "$PROFILE"` to run one live sync before ranking; newly discovered challenges become claimable immediately, platform solved rows are excluded, and sync deltas are recorded in metrics. Use `--category <category>` to focus one category, `--dry-run` to inspect the selected target without claiming, and `--allow-duplicate` only for intentional same-machine duplicate solving. The JSON includes `target_pack_path`; the solver should read that file before trying payloads.
 
 Prepare a target for immediate solving:
 
@@ -200,7 +200,7 @@ ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --c
 
 `prepare-target` runs the target planner, target pack, local auto-triage, and starter generation as one shell-first step. If `--challenge-id` is omitted, it runs `interactive next`; otherwise it prepares the specified canonical challenge or alias. With `--refresh`, it performs the same one-shot sync path as `next --refresh` first. The JSON returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. Read the target pack, triage summary, and starter file before manual analysis.
 
-`interactive status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. `active` means keep solving. `needs_sync` means a profile is configured but the board has not been refreshed. `no_claimable` means no fresh canonical target is currently available, often because work is already claimed locally. `all_solved` and `all_solved_or_stalled` are stop conditions. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
+`interactive status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. It also reports `solved_by_platform_count`, `solved_by_external_count`, and `solved_sync_available`. `active` means keep solving. `needs_sync` means a profile is configured but the board has not been refreshed. `no_claimable` means no fresh canonical target is currently available, often because work is already claimed locally. `all_solved` and `all_solved_or_stalled` are stop conditions; platform solved rows count toward completion. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
 
 Generate or refresh the solver launch pack:
 
@@ -308,7 +308,7 @@ Record a challenge solved outside this machine:
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
 ```
 
-`external-solved` accepts a canonical ID, canonical name, alias, static slug, or artifact source. It resolves to the canonical challenge, marks it `external_solved`/`solved_by_external`, writes local `external_solved.txt` entries, and releases any claim locks for the canonical challenge and aliases. Use this when a teammate solves a problem and the platform sync does not automatically expose team-solved state.
+`external-solved` accepts a canonical ID, canonical name, alias, static slug, or artifact source. It resolves to the canonical challenge, marks it `external_solved`/`solved_by_external` with `solved_source=external_solved_txt`, writes local `external_solved.txt` entries, records `external_solved_recorded`, and releases any claim locks for the canonical challenge, aliases, source IDs, and artifact sources. Use this manual fallback when a teammate solves a problem and the platform sync does not automatically expose team-solved state. Platform-solved teammate work does not create this agent's accepted writeup; writeups remain accepted-only unless there is local evidence and the user asks.
 
 Write accepted-only writeups:
 
@@ -411,7 +411,7 @@ Board stale or missing:
 
 ```bash
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 

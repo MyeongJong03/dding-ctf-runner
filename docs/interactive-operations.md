@@ -19,7 +19,7 @@ export AGENTS=4
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
 ./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ```
@@ -66,11 +66,12 @@ Sync and board canonicalization:
 - `interactive sync` folds duplicate platform rows into canonical challenges before claim.
 - Static shell pages are detected when they have only generic short text and favicon/CSS-style links, or when the row is a `-static` slug.
 - Alias rows include case, spacing, slug, and phase metadata variants. They are recorded on the canonical challenge as `aliases`, `artifact_sources`, and `source_ids` instead of becoming default claim targets.
-- `board.json` challenge rows include `canonical_id`, `canonical_name`, `aliases`, `artifact_sources`, `source_ids`, `is_static_shell`, `claimable`, and `solved_by_external`.
-- `interactive sync --json` reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
-- `interactive status --json` reports `completion_status`, `no_useful_work`, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, active local claims, stale claims, alias count, and artifact source count.
-- `completion_status` values are `active`, `needs_sync`, `no_claimable`, `all_solved`, and `all_solved_or_stalled`. Stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`.
-- There is no background refresh loop. New challenges are discovered only by visible commands: `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`.
+- `board.json` challenge rows include `canonical_id`, `canonical_name`, `aliases`, `artifact_sources`, `source_ids`, `is_static_shell`, `claimable`, `solved_by_platform`, `solved_by_external`, `solved_source`, `solved_synced_at`, and `solved_aliases`.
+- `interactive sync --pull-solved --json` reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, `claimable_count`, `solved_synced_count`, `external_solved_count`, `solved_alias_resolved_count`, and `solved_status_source`.
+- Platform solved IDs, aliases, or static names are resolved to the canonical challenge and excluded from `next`/`prepare-target`. If the platform lacks solved/submission state, `--pull-solved` is a safe no-op with `solved_status_source=unavailable`.
+- `interactive status --json` reports `completion_status`, `no_useful_work`, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, `solved_by_platform_count`, `solved_by_external_count`, `solved_sync_available`, active local claims, stale claims, alias count, and artifact source count.
+- `completion_status` values are `active`, `needs_sync`, `no_claimable`, `all_solved`, and `all_solved_or_stalled`. Platform solved rows count toward completion. Stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`.
+- There is no background refresh loop. New challenges and teammate solves are discovered only by visible commands: `interactive sync --live --pull-solved`, `interactive next --refresh`, or `interactive prepare-target --refresh`; the refresh paths pull solved status when available.
 
 Target planning and claim:
 
@@ -183,7 +184,7 @@ ctfctl interactive stalled --contest-id "$CONTEST_ID" --agent agent-1 --challeng
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
 ```
 
-`external-solved` accepts a canonical ID/name, alias, static slug, or artifact source. It marks the canonical challenge as `external_solved`, sets `solved_by_external`, appends local `external_solved.txt` entries, and releases claim locks for the canonical ID and aliases. Use this when a teammate solves a problem but platform sync does not expose team-solved state.
+`external-solved` accepts a canonical ID/name, alias, static slug, or artifact source. It marks the canonical challenge as `external_solved`, sets `solved_by_external` and `solved_source=external_solved_txt`, appends local `external_solved.txt` entries, records `external_solved_recorded`, and releases claim locks for the canonical ID, aliases, source IDs, and artifact sources. Use this manual fallback when a teammate solves a problem but platform sync does not expose team-solved state. Platform-solved teammate work does not create this agent's accepted writeup; writeups remain accepted-only unless there is local evidence and the user asks.
 
 Writeup and cleanup:
 
@@ -298,7 +299,7 @@ metrics/summary.json
 metrics/regression_report.md
 ```
 
-The claim, release, stalled, external-solved, attempt, candidate verification, submit, artifact upload, writeup, and cleanup
+The sync, solved-sync, claim, release, stalled, external-solved, attempt, candidate verification, submit, artifact upload, writeup, and cleanup
 commands record events where practical. Manual observations can be appended:
 
 ```bash

@@ -14,7 +14,7 @@ export AGENTS=4
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
 ./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ```
 
@@ -55,9 +55,9 @@ Monitor board:
 ./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ```
 
-Board sync is canonical-first. Alias/static shell rows stay in `board.json` under the canonical challenge as `aliases`, `artifact_sources`, and `source_ids`; default claims skip them. Check `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, and `claimable_count` after sync if the platform publishes duplicate rows.
+Board sync is canonical-first. Alias/static shell rows stay in `board.json` under the canonical challenge as `aliases`, `artifact_sources`, and `source_ids`; default claims skip them. Use `interactive sync --pull-solved` when the platform exposes team solved/submission state. Platform solved names, including aliases or static slugs, are resolved onto the canonical row as `solved_by_platform`, `solved_source=platform`, `solved_synced_at`, and `solved_aliases`. Check `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, `claimable_count`, `solved_synced_count`, and `solved_status_source` after sync if the platform publishes duplicate rows.
 
-There is no background refresh loop. To pick up newly released problems, run one visible refresh through `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`. Those commands record `sync_completed`, new challenge deltas, solved/external_solved changes, stale claims, and no-work states in local metrics.
+There is no background refresh loop. To pick up newly released problems, run one visible refresh through `interactive sync --live --pull-solved`, `interactive next --refresh`, or `interactive prepare-target --refresh`. Refresh through `next` and `prepare-target` pulls solved status when available, so already platform-solved canonical challenges are skipped before ranking. Those commands record `sync_completed`, `solved_sync_completed`, new challenge deltas, solved/external_solved changes, stale claims, and no-work states in local metrics.
 
 Pick or prepare the next target:
 
@@ -79,7 +79,7 @@ ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
 
 `solve-loop` is the default Codex harness after prompt startup: it selects or prepares a target, ensures target pack/triage/starter, runs the starter as a structured attempt, extracts local candidates, verifies confidence and submit guards, submits high-confidence candidates, then writes ko/en writeups, runs cleanup, updates metrics, and continues. If it exhausts `--max-attempts`, it updates attempts/next steps, records stalled metrics, creates no writeup, and continues to the next challenge.
 
-`prepare-target` is the manual Codex starter: it runs `next` when needed, generates the target pack, runs local-only category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. With `--refresh`, it performs the same single sync path as `next --refresh` first. `next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or clear `next_steps`. It skips alias/static rows and solved/external-solved/stalled-documented work. `status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`; stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos. `starter` creates the category solve skeleton and records it in board/operator metadata. `run-attempt` records raw local stdout/stderr/returncode/runtime in `attempts/`, updates `attempts.md`, extracts candidates into `candidates.jsonl`, and emits attempt metrics. `candidates` displays local raw candidate values; public snapshots include only candidate hash, length, source, status, confidence, and timestamp. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
+`prepare-target` is the manual Codex starter: it runs `next` when needed, generates the target pack, runs local-only category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. With `--refresh`, it performs the same single sync path as `next --refresh` first. `next` prefers canonical challenges with attachments, remote endpoints, confident categories, existing progress, or clear `next_steps`. It skips alias/static rows and locally solved/platform-solved/external-solved/stalled-documented work. `status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`, plus `solved_by_platform_count`, `solved_by_external_count`, and `solved_sync_available`; stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`. `target-pack` records the paths, aliases, artifact sources, remote info, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos. `starter` creates the category solve skeleton and records it in board/operator metadata. `run-attempt` records raw local stdout/stderr/returncode/runtime in `attempts/`, updates `attempts.md`, extracts candidates into `candidates.jsonl`, and emits attempt metrics. `candidates` displays local raw candidate values; public snapshots include only candidate hash, length, source, status, confidence, and timestamp. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
 
 Add operator information:
 
@@ -101,6 +101,8 @@ ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> -
 ```
 
 The `<id>` may be a canonical challenge, alias, static slug, or artifact source. This is the fallback when another teammate solved the challenge but team-solved state did not appear in platform sync.
+
+Manual `external-solved` writes `external_solved.txt`, marks the canonical row `solved_by_external` with `solved_source=external_solved_txt`, records `external_solved_recorded`, and releases any local claim locks that mention the canonical ID, aliases, source IDs, or artifact sources. A platform-solved teammate solve does not create this agent's accepted writeup; writeups remain accepted-only unless there is local evidence and the user asks.
 
 ## 4. Submit And Writeup
 

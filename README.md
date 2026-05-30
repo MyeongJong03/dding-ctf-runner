@@ -49,7 +49,7 @@ export AGENTS=4
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
 ./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
+./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
@@ -67,9 +67,9 @@ Paste one generated prompt into each Codex terminal. Recommended width:
 - Windows WSL: up to 6 Codex terminals.
 - MacBook: up to 4 Codex terminals.
 
-`interactive sync` builds a canonical challenge map before solvers claim work. Static shell pages, slug aliases, spacing/case variants, and phase metadata are folded into the canonical challenge's `aliases`, `artifact_sources`, and `source_ids` in `board.json`, then excluded from default claims. The sync JSON reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, and `claimable_count`.
+`interactive sync` builds a canonical challenge map before solvers claim work. Static shell pages, slug aliases, spacing/case variants, and phase metadata are folded into the canonical challenge's `aliases`, `artifact_sources`, and `source_ids` in `board.json`, then excluded from default claims. Add `--pull-solved` when the platform exposes team solved/submission state; alias or static solved names are resolved onto the canonical challenge as `solved_by_platform`, `solved_source=platform`, `solved_synced_at`, and `solved_aliases`. The sync JSON reports `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, `claimable_count`, `solved_synced_count`, `external_solved_count`, `solved_alias_resolved_count`, and `solved_status_source`.
 
-There is no background refresh loop. During a live contest, refresh happens only when a Codex/operator explicitly runs `interactive sync --live`, `interactive next --refresh`, or `interactive prepare-target --refresh`. `next --refresh` and `prepare-target --refresh` perform one live discovery using the configured profile, record sync deltas in metrics, then continue with normal ranking/preparation. New challenges discovered by that single refresh become claimable immediately.
+There is no background refresh loop. During a live contest, refresh happens only when a Codex/operator explicitly runs `interactive sync --live --pull-solved`, `interactive next --refresh`, or `interactive prepare-target --refresh`. `next --refresh` and `prepare-target --refresh` perform one live discovery using the configured profile and pull solved status when available, then continue with normal ranking/preparation. New challenges discovered by that single refresh become claimable immediately; platform-solved and manually external-solved canonical challenges are skipped.
 
 Inside the same computer, duplicate claims are blocked by default on the canonical challenge. Use `ctfctl interactive claim --allow-duplicate` only when you intentionally want multiple local Codex sessions on the same problem. Duplicate claims across different computers are not coordinated.
 
@@ -103,11 +103,11 @@ ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 
 `interactive solve-loop` is the preferred automation harness after target setup. It ensures `prepare-target`, executes the starter as a structured attempt, records stdout/stderr/returncode/runtime under `attempts/`, extracts local flag-like candidates into `candidates.jsonl`, verifies confidence and duplicate/wrong guards, and submits only high-confidence candidates through the guarded interactive submit path. Accepted solves continue to ko/en writeup, safe cleanup, and metrics summary; exhausted attempts mark the challenge stalled without creating a writeup.
 
-`interactive status` summarizes board completion: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. It also reports active local claims, stale claims, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, alias count, and artifact source count. Stop only when the contest ends, the user stops the solver, or `completion_status` is `all_solved` or `all_solved_or_stalled`.
+`interactive status` summarizes board completion: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`. It also reports active local claims, stale claims, canonical/todo/claimed/solved/external_solved/stalled/skipped counts, `solved_by_platform_count`, `solved_by_external_count`, `solved_sync_available`, alias count, and artifact source count. Stop only when the contest ends, the user stops the solver, or `completion_status` is `all_solved` or `all_solved_or_stalled`.
 
 `interactive prepare-target` is the preferred manual solver starter. With no `--challenge-id`, it runs `next`, generates the target pack, runs local-only category triage, creates a category starter file, and returns `target_pack_path`, `triage_summary_path`, `starter_path`, `top_files`, `first_commands`, and `next_steps`. With `--refresh`, it first performs the same one-shot sync path as `next --refresh`.
 
-`interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear `next_steps` raise priority; alias/static rows, generic no-file statements, solved, externally solved, and stalled-documented challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
+`interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear `next_steps` raise priority; alias/static rows, generic no-file statements, locally solved, platform-solved, external-solved, and stalled-documented challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
 
 `interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 
@@ -115,11 +115,13 @@ ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 
 For manual experiments, use `run-attempt -> candidates -> verify-candidate`. Attempt JSON stores raw local stdout/stderr and raw candidates for solving. Public-safe metrics snapshots include only candidate hash, length, source, status, confidence, and timestamp.
 
-When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, or alias:
+When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, static slug, artifact source, or alias:
 
 ```bash
 ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id-or-alias> --json
 ```
+
+This manual fallback writes `external_solved.txt`, marks the canonical row `solved_by_external` with `solved_source=external_solved_txt`, records `external_solved_recorded`, and releases claim locks for aliases/artifact sources. Platform-solved teammate work does not create this agent's accepted writeup; writeups still require local accepted evidence.
 
 Writeups are accepted-only. Accepted challenges produce both Korean and English files named:
 

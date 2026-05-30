@@ -596,8 +596,10 @@ def test_external_solved_alias_marks_canonical_and_releases_alias_locks(tmp_path
 
     marked = _run_json(["interactive", "external-solved", "--contest-id", "defcon", "--challenge", "birdhouse-static", "--json"])
     board = _run_json(["interactive", "board", "--contest-id", "defcon", "--json"])
+    status = _run_json(["interactive", "status", "--contest-id", "defcon", "--json"])
     birdhouse = next(item for item in board["challenges"]["solved"] if item["challenge_id"] == "birdhouse")
     external_text = (root / "external_solved.txt").read_text(encoding="utf-8")
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
 
     assert marked["status"] == "ok"
     assert marked["challenge_id"] == "birdhouse"
@@ -606,8 +608,12 @@ def test_external_solved_alias_marks_canonical_and_releases_alias_locks(tmp_path
     assert not list((root / "claims").glob("*.lock"))
     assert birdhouse["status"] == "external_solved"
     assert birdhouse["solved_by_external"] is True
+    assert birdhouse["solved_source"] == "external_solved_txt"
+    assert status["solved_by_external_count"] == 1
+    assert "birdhouse-static" in birdhouse["solved_aliases"]
     assert "birdhouse-static" in external_text
     assert "Birdhouse" in external_text
+    assert "external_solved_recorded" in events
 
 
 def test_sync_platform_solved_status_excludes_team_solved_without_raw_submission(tmp_path: Path, monkeypatch):
@@ -617,20 +623,88 @@ def test_sync_platform_solved_status_excludes_team_solved_without_raw_submission
     monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeSolvedSyncPlatform())
     raw_marker = "TOKEN_SYNTHETIC_SUBMISSION_MARKER"
 
-    result, output = _run_json_with_output(["interactive", "sync", "--contest-id", "solved-sync", "--profile", str(profile), "--live", "--json"])
+    result, output = _run_json_with_output(
+        ["interactive", "sync", "--contest-id", "solved-sync", "--profile", str(profile), "--live", "--pull-solved", "--json"]
+    )
     claim = _run_json(["interactive", "claim", "--contest-id", "solved-sync", "--agent", "a1", "--json"])
     root = tmp_path / "contests" / "solved-sync" / "operator"
     board_text = (root / "board.json").read_text(encoding="utf-8")
     board = json.loads(board_text)
+    status = _run_json(["interactive", "status", "--contest-id", "solved-sync", "--json"])
 
     assert result["status"] == "ok"
     assert result["claimable_count"] == 0
+    assert result["solved_synced_count"] == 1
+    assert result["solved_status_source"] == "discover"
     assert claim["status"] == "empty"
-    assert board["challenges"][0]["status"] == "external_solved"
-    assert board["challenges"][0]["solved_by_external"] is True
+    assert board["challenges"][0]["status"] == "solved"
+    assert board["challenges"][0]["solved_by_platform"] is True
+    assert board["challenges"][0]["solved_by_external"] is False
+    assert board["challenges"][0]["solved_source"] == "platform"
     assert board["challenges"][0]["platform_submission"]["status"] == "correct"
+    assert status["solved"] == 1
+    assert status["external_solved"] == 0
+    assert status["solved_by_platform_count"] == 1
+    assert status["solved_by_external_count"] == 0
+    assert status["solved_sync_available"] is True
     assert raw_marker not in output
     assert raw_marker not in board_text
+
+
+def test_sync_alias_platform_solved_marks_canonical_and_records_metrics(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeAliasSolvedSyncPlatform())
+
+    result = _run_json(["interactive", "sync", "--contest-id", "alias-solved", "--profile", str(profile), "--live", "--pull-solved", "--json"])
+    root = tmp_path / "contests" / "alias-solved" / "operator"
+    board = json.loads((root / "board.json").read_text(encoding="utf-8"))
+    favorite = next(item for item in board["challenges"] if item["challenge_id"] == "my-favorite-instructions")
+    next_target = _run_json(["interactive", "next", "--contest-id", "alias-solved", "--agent", "a1", "--json"])
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+
+    assert result["solved_synced_count"] == 1
+    assert result["solved_alias_resolved_count"] == 1
+    assert favorite["status"] == "solved"
+    assert favorite["solved_by_platform"] is True
+    assert favorite["solved_source"] == "platform"
+    assert "FavoriteInstructions" in favorite["solved_aliases"]
+    assert next_target["challenge_id"] == "fresh-target"
+    assert "solved_sync_completed" in events
+
+
+def test_sync_pull_solved_noops_when_platform_lacks_solved_info(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeSyncPlatform())
+
+    result = _run_json(["interactive", "sync", "--contest-id", "no-solved-info", "--profile", str(profile), "--live", "--pull-solved", "--json"])
+    status = _run_json(["interactive", "status", "--contest-id", "no-solved-info", "--json"])
+    root = tmp_path / "contests" / "no-solved-info" / "operator"
+    events = (root / "metrics" / "events.jsonl").read_text(encoding="utf-8")
+
+    assert result["status"] == "ok"
+    assert result["solved_synced_count"] == 0
+    assert result["solved_status_source"] == "unavailable"
+    assert result["solved_sync_available"] is False
+    assert status["todo"] == 1
+    assert status["solved_by_platform_count"] == 0
+    assert "solved_sync_completed" in events
+
+
+def test_interactive_sync_uses_configured_profile_when_profile_arg_omitted(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CTF_CONTESTS_ROOT", str(tmp_path / "contests"))
+    profile = tmp_path / "profile.yaml"
+    profile.write_text("name: demo\n", encoding="utf-8")
+    monkeypatch.setattr("ctf_runner.interactive.load_platform_adapter", lambda profile: FakeSyncPlatform())
+    _run_json(["interactive", "init", "--contest-id", "profile-optional", "--profile", str(profile), "--json"])
+
+    result = _run_json(["interactive", "sync", "--contest-id", "profile-optional", "--live", "--json"])
+
+    assert result["status"] == "ok"
+    assert result["canonical_count"] == 1
 
 
 def test_interactive_status_reports_active_with_todo_challenges(tmp_path: Path, monkeypatch):
@@ -643,6 +717,9 @@ def test_interactive_status_reports_active_with_todo_challenges(tmp_path: Path, 
     assert status["canonical_count"] == 1
     assert status["claimable_count"] == 1
     assert status["todo"] == 1
+    assert status["solved_by_platform_count"] == 0
+    assert status["solved_by_external_count"] == 0
+    assert status["solved_sync_available"] is False
     assert status["no_useful_work"] is False
 
 
@@ -656,6 +733,8 @@ def test_interactive_status_reports_all_solved_when_all_canonical_solved(tmp_pat
     assert status["completion_status"] == "all_solved"
     assert status["solved"] == 1
     assert status["external_solved"] == 0
+    assert status["solved_by_platform_count"] == 0
+    assert status["solved_by_external_count"] == 0
     assert status["no_useful_work"] is True
 
 
@@ -667,6 +746,40 @@ def test_interactive_status_reports_all_solved_or_stalled(tmp_path: Path, monkey
 
     assert status["completion_status"] == "all_solved_or_stalled"
     assert status["stalled"] == 1
+    assert status["no_useful_work"] is True
+
+
+def test_completion_status_counts_platform_solved_with_stalled(tmp_path: Path, monkeypatch):
+    _seed_board(tmp_path, monkeypatch)
+    root = tmp_path / "contests" / "demo" / "operator"
+    board_path = root / "board.json"
+    board = json.loads(board_path.read_text(encoding="utf-8"))
+    board["challenges"] = [
+        {
+            "challenge_id": "platform-done",
+            "name": "Platform Done",
+            "category": "misc",
+            "status": "solved",
+            "platform_solved": True,
+            "solved_by_platform": True,
+            "solved_source": "platform",
+        },
+        {
+            "challenge_id": "blocked",
+            "name": "Blocked",
+            "category": "misc",
+            "status": "stalled",
+            "stalled_reason": "documented blocker",
+        },
+    ]
+    board_path.write_text(json.dumps(board), encoding="utf-8")
+
+    status = _run_json(["interactive", "status", "--contest-id", "demo", "--json"])
+
+    assert status["completion_status"] == "all_solved_or_stalled"
+    assert status["solved"] == 1
+    assert status["stalled"] == 1
+    assert status["solved_by_platform_count"] == 1
     assert status["no_useful_work"] is True
 
 
@@ -716,6 +829,7 @@ def test_interactive_prepare_target_refresh_returns_no_useful_work_when_no_targe
     assert result["completion_status"] == "all_solved"
     assert result["no_useful_work"] is True
     assert result["selection"]["refresh"]["claimable_count"] == 0
+    assert result["selection"]["refresh"]["solved_synced_count"] == 1
 
 
 def test_interactive_next_skips_solved_and_external_solved_challenges(tmp_path: Path, monkeypatch):
@@ -731,6 +845,16 @@ def test_interactive_next_skips_solved_and_external_solved_challenges(tmp_path: 
                 "category": "misc",
                 "status": "todo",
                 "priority": 1,
+            },
+            {
+                "challenge_id": "platform-solved",
+                "name": "Platform Solved",
+                "category": "misc",
+                "status": "solved",
+                "priority": 0,
+                "platform_solved": True,
+                "solved_by_platform": True,
+                "solved_source": "platform",
             },
             {
                 "challenge_id": "fresh-target",
@@ -1204,6 +1328,42 @@ class FakeSolvedSyncPlatform:
                         "solved": True,
                         "submission": {"status": "correct", "candidate": "TOKEN_SYNTHETIC_SUBMISSION_MARKER"},
                     }
+                ]
+            },
+        )
+
+
+class FakeAliasSolvedSyncPlatform:
+    def discover_challenges(self, live: bool = False) -> PlatformAction:
+        return PlatformAction(
+            action="discover_challenges",
+            live=live,
+            network=live,
+            status="ok",
+            details={
+                "challenges": [
+                    {
+                        "challenge_id": "FavoriteInstructions",
+                        "name": "FavoriteInstructions",
+                        "category": "misc",
+                        "statement": "Alias row solved by a teammate.",
+                        "file_count": 0,
+                        "solved": True,
+                    },
+                    {
+                        "challenge_id": "my-favorite-instructions",
+                        "name": "My Favorite Instructions",
+                        "category": "misc",
+                        "statement": "Canonical target with the real handout.",
+                        "file_count": 1,
+                    },
+                    {
+                        "challenge_id": "fresh-target",
+                        "name": "Fresh Target",
+                        "category": "misc",
+                        "statement": "Still open.",
+                        "file_count": 1,
+                    },
                 ]
             },
         )

@@ -22,7 +22,7 @@ from .fake_ctfd import FakeCTFdServer, default_correct_flag, platform_config
 from .file_manifest import is_sensitive_path
 from .ingest import ingest_challenge, ingest_text_challenge
 from .paths import get_paths
-from .platform_base import action_to_dict
+from .platform_base import PlatformAction, action_to_dict
 from .platform_ctfd import load_platform_adapter
 from .redact import redact_text
 from .state import utc_now
@@ -84,15 +84,19 @@ def init_operator(
 def sync_operator(
     contest_id: str,
     *,
-    profile: str | Path,
+    profile: str | Path | None = None,
     live: bool = False,
     download: bool = False,
     ingest: bool = False,
+    pull_solved: bool = False,
 ) -> dict[str, Any]:
     init_operator(contest_id, profile=profile)
     root = operator_root(contest_id)
+    resolved_profile = _refresh_profile_path(root, profile)
+    if not resolved_profile:
+        return {"status": "blocked", "contest_id": contest_id, "reason": "profile_required_for_sync"}
     board = _read_board(root, contest_id)
-    platform = load_platform_adapter(profile)
+    platform = load_platform_adapter(resolved_profile)
     previous_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
     previous_board = {**board, "challenges": previous_items}
     _apply_runtime_statuses(root, previous_board)
@@ -112,6 +116,11 @@ def sync_operator(
             warnings.extend(str(item) for item in text_result.get("warnings") or [])
 
     canonical = _canonicalize_challenges(source_challenges)
+    discovered_solved = _discover_solved_status(source_challenges)
+    adapter_solved = _collect_platform_solved_status(platform, live=live) if pull_solved else _empty_solved_status("not_requested")
+    solved_records = [*discovered_solved["records"], *adapter_solved["records"]]
+    solved_status_source = _combine_solved_status_sources(discovered_solved, adapter_solved, pull_solved=pull_solved)
+    solved_sync_available = bool(discovered_solved["available"] or adapter_solved["available"])
     previous_by_key: dict[str, dict[str, Any]] = {}
     for previous in previous_items:
         for key in _challenge_keys(previous):
@@ -137,13 +146,22 @@ def sync_operator(
         preserved["path"] = _challenge_path(contest_id, preserved).as_posix()
         merged_challenges.append(preserved)
 
-    board["profile_path"] = _display(Path(profile).expanduser())
+    board["profile_path"] = _display(Path(resolved_profile).expanduser())
     board["updated_at"] = utc_now()
     board["last_sync_at"] = board["updated_at"]
     board["canonical_map"] = canonical["map"]
     board["canonical_counts"] = canonical["counts"]
     board["challenges"] = sorted(merged_challenges, key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or "")))
+    solved_sync = _apply_platform_solved_records(
+        root,
+        board,
+        solved_records,
+        available=solved_sync_available,
+        source=solved_status_source,
+        synced_at=str(board["updated_at"]),
+    )
     _apply_runtime_statuses(root, board)
+    solved_sync = _refresh_solved_sync_counts(board, solved_sync)
     after_items = [dict(item) for item in board.get("challenges", []) if isinstance(item, Mapping)]
     after_signatures = _sync_signatures(root, after_items)
     after_statuses = _sync_statuses(root, after_items)
@@ -161,7 +179,7 @@ def sync_operator(
     ]
     stale_before_release = _stale_claims(root, board)
     for challenge in board["challenges"]:
-        if challenge.get("solved_by_external"):
+        if _item_solved_by_platform_or_external(challenge):
             _release_locks_for_item(root, agent=None, item=challenge)
     _write_board(root, board)
     _write_board_md(root, board)
@@ -215,8 +233,15 @@ def sync_operator(
         "status_change_count": len(status_changes),
         "new_challenge_ids": [after_public_ids.get(key, key) for key in new_keys],
         "updated_challenge_ids": [after_public_ids.get(key, key) for key in updated_keys],
+        "solved_synced_count": solved_sync["solved_synced_count"],
+        "external_solved_count": solved_sync["external_solved_count"],
+        "solved_alias_resolved_count": solved_sync["solved_alias_resolved_count"],
+        "solved_status_source": solved_status_source,
+        "solved_sync_available": solved_sync_available,
     }
     _record_metrics_event(root, contest_id=contest_id, event="sync_completed", data=sync_metrics)
+    if pull_solved or solved_sync_available:
+        _record_metrics_event(root, contest_id=contest_id, event="solved_sync_completed", data=solved_sync)
     if new_keys:
         _record_metrics_event(
             root,
@@ -251,6 +276,11 @@ def sync_operator(
         "alias_count": canonical["counts"]["alias_count"],
         "skipped_static_count": canonical["counts"]["skipped_static_count"],
         "claimable_count": claimable_count,
+        "solved_synced_count": solved_sync["solved_synced_count"],
+        "external_solved_count": solved_sync["external_solved_count"],
+        "solved_alias_resolved_count": solved_sync["solved_alias_resolved_count"],
+        "solved_status_source": solved_status_source,
+        "solved_sync_available": solved_sync_available,
         "status_changes": status_changes[:50],
         "stale_claim_count": len(stale_before_release),
         "canonical_map": canonical["map"],
@@ -381,12 +411,13 @@ def next_challenge(
     dry_run: bool = False,
     refresh: bool = False,
     profile: str | Path | None = None,
+    pull_solved: bool = False,
 ) -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
     refresh_result: dict[str, Any] | None = None
     if refresh:
-        refresh_result = _refresh_operator_once(contest_id, root, profile)
+        refresh_result = _refresh_operator_once(contest_id, root, profile, pull_solved=True)
         if refresh_result.get("status") in {"blocked", "error", "auth_required", "rate_limited", "unexpected_response"}:
             board = _read_board(root, contest_id)
             _apply_runtime_statuses(root, board)
@@ -679,6 +710,7 @@ def prepare_target(
     challenge_id: str | None = None,
     refresh: bool = False,
     profile: str | Path | None = None,
+    pull_solved: bool = False,
 ) -> dict[str, Any]:
     init_operator(contest_id)
     selected: dict[str, Any] = {}
@@ -686,7 +718,7 @@ def prepare_target(
     refresh_result: dict[str, Any] | None = None
     if refresh and effective_challenge:
         root = operator_root(contest_id)
-        refresh_result = _refresh_operator_once(contest_id, root, profile)
+        refresh_result = _refresh_operator_once(contest_id, root, profile, pull_solved=True)
         if refresh_result.get("status") in {"blocked", "error", "auth_required", "rate_limited", "unexpected_response"}:
             board = _read_board(root, contest_id)
             _apply_runtime_statuses(root, board)
@@ -702,7 +734,7 @@ def prepare_target(
                 "status_summary": _compact_status_summary(status_summary),
             }
     if not effective_challenge:
-        selected = next_challenge(contest_id, agent=agent, refresh=refresh, profile=profile)
+        selected = next_challenge(contest_id, agent=agent, refresh=refresh, profile=profile, pull_solved=pull_solved)
         refresh_result = selected.get("refresh") if isinstance(selected.get("refresh"), dict) else refresh_result
         if selected.get("status") not in {"claimed", "planned"}:
             completion_status = selected.get("completion_status")
@@ -1221,13 +1253,17 @@ def mark_external_solved(contest_id: str, *, challenge: str) -> dict[str, Any]:
             existing.add(line)
     item["status"] = "external_solved"
     item["solved_by_external"] = True
+    item["solved_source"] = "external_solved_txt"
+    item["solved_synced_at"] = utc_now()
+    if _record_resolved_alias(item, challenge):
+        item["solved_aliases"] = _dedupe_strings([*_list_values(item.get("solved_aliases")), challenge])
     released = _release_locks_for_item(root, agent=None, item=item)
     _write_board(root, board)
     _write_board_md(root, board)
     _record_metrics_event(
         root,
         contest_id=contest_id,
-        event="external_solved",
+        event="external_solved_recorded",
         challenge_id=str(item.get("challenge_id") or challenge),
         data={"released_count": released, "matched": redact_text(challenge)},
     )
@@ -1288,6 +1324,8 @@ def submit_flag_file(contest_id: str, *, challenge_id: str, flag_file: str | Pat
         _append_jsonl(root / "solved.jsonl", solved)
         item["status"] = "solved"
         item["solved_at"] = solved["timestamp"]
+        item["solved_source"] = "submit"
+        item["solved_by_external"] = False
         item["flag_hash"] = flag_digest
         _release_locks_for_item(root, agent=None, item=item)
         _write_board(root, board)
@@ -1451,6 +1489,8 @@ def upload_submit(
             if isinstance(item, dict):
                 item["status"] = "solved"
                 item["solved_at"] = timestamp
+                item["solved_source"] = "submit"
+                item["solved_by_external"] = False
                 item["artifact_sha256"] = record.get("artifact_sha256")
             _release_locks_for_item(root, agent=None, item=item)
             _write_board(root, board)
@@ -2514,6 +2554,8 @@ def _canonicalize_challenges(challenges: Iterable[Mapping[str, Any]]) -> dict[st
         artifact_sources: list[str] = []
         source_ids: list[str] = []
         platform_solved = bool(canonical.get("platform_solved"))
+        platform_solved_known = bool(canonical.get("platform_solved_known"))
+        solved_aliases: list[str] = []
         submit_metadata = canonical.get("platform_submission") if isinstance(canonical.get("platform_submission"), Mapping) else {}
 
         for source in group:
@@ -2523,7 +2565,10 @@ def _canonicalize_challenges(challenges: Iterable[Mapping[str, Any]]) -> dict[st
                 canonical_map[source_id] = str(canonical["challenge_id"])
             if source.get("slug"):
                 canonical_map[str(source["slug"])] = str(canonical["challenge_id"])
+            platform_solved_known = platform_solved_known or bool(source.get("platform_solved_known"))
             platform_solved = platform_solved or bool(source.get("platform_solved"))
+            if source.get("platform_solved"):
+                solved_aliases.extend(_platform_solved_alias_values(source, canonical))
             if isinstance(source.get("platform_submission"), Mapping):
                 submit_metadata = {**dict(submit_metadata), **dict(source["platform_submission"])}
 
@@ -2545,11 +2590,14 @@ def _canonicalize_challenges(challenges: Iterable[Mapping[str, Any]]) -> dict[st
         canonical["artifact_sources"] = _dedupe_strings(artifact_sources)
         canonical["source_ids"] = _dedupe_strings(source_ids)
         canonical["platform_solved"] = platform_solved
+        canonical["platform_solved_known"] = platform_solved_known
+        canonical["solved_aliases"] = _dedupe_strings([*_list_values(canonical.get("solved_aliases")), *solved_aliases])
         if submit_metadata:
             canonical["platform_submission"] = dict(submit_metadata)
         if platform_solved:
-            canonical["status"] = "external_solved"
-            canonical["solved_by_external"] = True
+            canonical["status"] = "solved"
+            canonical["solved_by_platform"] = True
+            canonical["solved_source"] = "platform"
         canonical["claimable"] = _claimable_source(canonical)
         result.append(canonical)
 
@@ -2572,6 +2620,7 @@ def _challenge_from_source(item: Mapping[str, Any]) -> dict[str, Any]:
     file_count = _source_file_count(item, attachments)
     platform_status = _source_platform_status(item)
     platform_submission = _source_submission_summary(item)
+    platform_solved_known = _source_platform_solved_known(item, platform_status=platform_status, platform_submission=platform_submission)
     platform_solved = _source_platform_solved(item, platform_status=platform_status, platform_submission=platform_submission)
     canonical_name = _canonical_name(str(name or challenge_id))
     is_static_shell = _is_static_shell_source(
@@ -2597,6 +2646,7 @@ def _challenge_from_source(item: Mapping[str, Any]) -> dict[str, Any]:
         "attachment_count": file_count,
         "link_count": len(links),
         "platform_solved": platform_solved,
+        "platform_solved_known": platform_solved_known,
         "platform_status": platform_status,
         "platform_submission": platform_submission,
         "canonical_id": challenge_id,
@@ -2604,10 +2654,13 @@ def _challenge_from_source(item: Mapping[str, Any]) -> dict[str, Any]:
         "is_static_shell": is_static_shell,
         "is_static_alias": is_static_shell,
         "claimable": not is_static_shell,
+        "solved_by_platform": platform_solved,
         "solved_by_external": False,
+        "solved_source": "platform" if platform_solved else "",
+        "solved_aliases": [],
         "tags": list(item.get("tags") or []),
         "priority": 100,
-        "status": "external_solved" if platform_solved else "skipped" if is_static_shell else "todo",
+        "status": "solved" if platform_solved else "skipped" if is_static_shell else "todo",
     }
 
 
@@ -2642,6 +2695,8 @@ def _canonical_entry(source: Mapping[str, Any]) -> dict[str, Any]:
     canonical.setdefault("aliases", [])
     canonical.setdefault("artifact_sources", [])
     canonical.setdefault("source_ids", [canonical["canonical_id"]])
+    canonical.setdefault("solved_aliases", [])
+    canonical.setdefault("solved_source", "platform" if canonical.get("platform_solved") else "")
     canonical["claimable"] = not bool(canonical.get("is_static_shell"))
     if canonical.get("is_static_shell"):
         canonical["status"] = "skipped"
@@ -2686,6 +2741,20 @@ def _source_alias_values(source: Mapping[str, Any]) -> list[str]:
         str(source.get("slug") or "").strip(),
     ]
     return _dedupe_strings(value for value in values if value)
+
+
+def _platform_solved_alias_values(source: Mapping[str, Any], canonical: Mapping[str, Any]) -> list[str]:
+    canonical_keys = {
+        _normalize(str(canonical.get("challenge_id") or "")),
+        _normalize(str(canonical.get("canonical_id") or "")),
+        _normalize(str(canonical.get("canonical_name") or "")),
+        _normalize(str(canonical.get("name") or "")),
+    }
+    aliases: list[str] = []
+    for value in _source_alias_values(source):
+        if _normalize(value) not in canonical_keys:
+            aliases.append(value)
+    return _dedupe_strings(aliases)
 
 
 def _is_artifact_source(source: Mapping[str, Any]) -> bool:
@@ -2808,10 +2877,35 @@ def _source_submission_summary(item: Mapping[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _source_platform_solved_known(item: Mapping[str, Any], *, platform_status: str, platform_submission: Mapping[str, Any]) -> bool:
+    for key in ("solved", "solved_by_me", "completed", "accepted", "correct"):
+        if key in item and item.get(key) is not None:
+            return True
+    if platform_submission:
+        return True
+    status_text = " ".join(
+        str(value or "")
+        for value in (
+            platform_status,
+            platform_submission.get("status"),
+            platform_submission.get("state"),
+            platform_submission.get("result"),
+        )
+    ).lower()
+    if not status_text.strip():
+        return False
+    if any(token in status_text for token in ("unsolved", "not solved", "already_solved", "already solved")):
+        return True
+    status_words = set(re.sub(r"[^a-z0-9]+", " ", status_text).split())
+    return bool(status_words & {"accepted", "correct", "solved", "completed", "incorrect", "wrong", "rejected"})
+
+
 def _source_platform_solved(item: Mapping[str, Any], *, platform_status: str, platform_submission: Mapping[str, Any]) -> bool:
     solved = item.get("solved")
     if solved is None:
         solved = item.get("solved_by_me", item.get("completed"))
+    if solved is None:
+        solved = item.get("accepted", item.get("correct"))
     if isinstance(solved, bool):
         return solved
     if solved is not None and str(solved).strip().lower() in {"1", "true", "yes", "solved", "accepted", "correct", "completed"}:
@@ -2829,6 +2923,334 @@ def _source_platform_solved(item: Mapping[str, Any], *, platform_status: str, pl
         return False
     status_words = set(re.sub(r"[^a-z0-9]+", " ", status_text).split())
     return bool(status_words & {"accepted", "correct", "solved", "completed"} or "already_solved" in status_text)
+
+
+def _empty_solved_status(source: str) -> dict[str, Any]:
+    return {"available": False, "source": source, "records": []}
+
+
+def _discover_solved_status(challenges: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    available = False
+    for item in challenges:
+        if not isinstance(item, Mapping):
+            continue
+        record = _platform_solved_record_from_mapping(item, source="discover")
+        if not record:
+            continue
+        available = True
+        records.append(record)
+    return {"available": available, "source": "discover" if available else "unavailable", "records": records}
+
+
+def _collect_platform_solved_status(platform: Any, *, live: bool) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    sources: list[str] = []
+    attempted = False
+    for name in (
+        "solved_status",
+        "get_solved_status",
+        "list_solved",
+        "list_solved_challenges",
+        "list_submissions",
+        "discover_submissions",
+        "submission_status",
+    ):
+        method = getattr(platform, name, None)
+        if not callable(method):
+            continue
+        attempted = True
+        payload = _call_platform_solved_method(method, live=live)
+        status = str(payload.get("status") or "")
+        if status in {"blocked", "planned", "not_implemented", "auth_required", "rate_limited", "network_error", "unexpected_response", "error"}:
+            continue
+        parsed = _platform_solved_records_from_payload(payload.get("payload"), source=name)
+        if parsed["available"]:
+            records.extend(parsed["records"])
+            sources.append(name)
+    if records or sources:
+        return {"available": True, "source": "+".join(_dedupe_strings(sources)) or "platform", "records": records}
+    return _empty_solved_status("unavailable" if attempted else "unavailable")
+
+
+def _call_platform_solved_method(method: Any, *, live: bool) -> dict[str, Any]:
+    try:
+        result = method(live=live)
+    except TypeError:
+        try:
+            result = method()
+        except TypeError as exc:
+            return {"status": "error", "payload": {"reason": redact_text(str(exc))[:200]}}
+    except Exception as exc:  # pragma: no cover - defensive adapter boundary.
+        return {"status": "error", "payload": {"reason": redact_text(str(exc))[:200]}}
+    if isinstance(result, PlatformAction):
+        return {"status": result.status, "payload": action_to_dict(result)}
+    if isinstance(result, Mapping):
+        return {"status": str(result.get("status") or "ok"), "payload": dict(result)}
+    if isinstance(result, list):
+        return {"status": "ok", "payload": result}
+    return {"status": "unavailable", "payload": {}}
+
+
+def _combine_solved_status_sources(discovered: Mapping[str, Any], adapter: Mapping[str, Any], *, pull_solved: bool) -> str:
+    sources: list[str] = []
+    if discovered.get("available"):
+        sources.append(str(discovered.get("source") or "discover"))
+    if adapter.get("available"):
+        sources.append(str(adapter.get("source") or "platform"))
+    if sources:
+        return "+".join(_dedupe_strings(sources))
+    return "unavailable" if pull_solved else "not_requested"
+
+
+def _platform_solved_records_from_payload(payload: Any, *, source: str) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
+    available = False
+
+    def add(record: dict[str, Any] | None) -> None:
+        nonlocal available
+        if not record:
+            return
+        available = True
+        records.append(record)
+
+    def visit(value: Any, *, key_hint: str = "", depth: int = 0) -> None:
+        nonlocal available
+        if depth > 5:
+            return
+        if isinstance(value, PlatformAction):
+            visit(action_to_dict(value), key_hint=key_hint, depth=depth + 1)
+            return
+        if isinstance(value, Mapping):
+            details = value.get("details")
+            if isinstance(details, Mapping):
+                visit(details, key_hint=key_hint, depth=depth + 1)
+            data = value.get("data")
+            if isinstance(data, (Mapping, list)):
+                visit(data, key_hint=key_hint or "data", depth=depth + 1)
+            if _looks_like_status_map(value):
+                for challenge, status_value in value.items():
+                    add(_platform_solved_record_from_key_value(str(challenge), status_value, source=source))
+                return
+            add(_platform_solved_record_from_mapping(value, source=source))
+            for key in (
+                "solved",
+                "solved_challenges",
+                "solved_ids",
+                "solved_names",
+                "team_solved",
+                "accepted",
+                "submissions",
+                "submission",
+                "last_submission",
+                "statuses",
+                "status",
+                "challenges",
+                "items",
+                "results",
+            ):
+                if key in value:
+                    if key in {"solved", "solved_challenges", "solved_ids", "solved_names", "team_solved", "accepted", "submissions", "statuses"}:
+                        available = True
+                    visit(value.get(key), key_hint=key, depth=depth + 1)
+            return
+        if isinstance(value, list):
+            if key_hint in {"solved", "solved_challenges", "solved_ids", "solved_names", "team_solved", "accepted"}:
+                for item in value:
+                    if isinstance(item, (str, int)) and not isinstance(item, bool):
+                        add(_platform_solved_record_from_key_value(str(item), True, source=source))
+                    else:
+                        visit(item, key_hint=key_hint, depth=depth + 1)
+                return
+            for item in value:
+                visit(item, key_hint=key_hint, depth=depth + 1)
+            return
+        if key_hint in {"solved", "solved_challenges", "solved_ids", "solved_names", "team_solved", "accepted"} and isinstance(value, (str, int)) and not isinstance(value, bool):
+            add(_platform_solved_record_from_key_value(str(value), True, source=source))
+
+    visit(payload)
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        challenge = str(record.get("challenge") or "").strip()
+        if not challenge:
+            continue
+        key = (_normalize(challenge), str(record.get("source") or source))
+        existing = deduped.get(key)
+        if existing and existing.get("solved"):
+            continue
+        deduped[key] = record
+    return {"available": available, "records": list(deduped.values())}
+
+
+def _looks_like_status_map(value: Mapping[str, Any]) -> bool:
+    if not value:
+        return False
+    structural = {
+        "action",
+        "details",
+        "data",
+        "status",
+        "challenges",
+        "items",
+        "results",
+        "submissions",
+        "solved",
+        "challenge_id",
+        "id",
+        "name",
+        "slug",
+    }
+    if any(key in structural for key in value.keys()):
+        return False
+    scalar_count = 0
+    for item in value.values():
+        if isinstance(item, (bool, str, int)) or item is None:
+            scalar_count += 1
+        elif isinstance(item, Mapping):
+            scalar_count += 1
+        else:
+            return False
+    return scalar_count > 0
+
+
+def _platform_solved_record_from_key_value(challenge: str, value: Any, *, source: str) -> dict[str, Any] | None:
+    if isinstance(value, Mapping):
+        payload = {"challenge_id": challenge, **dict(value)}
+        return _platform_solved_record_from_mapping(payload, source=source)
+    if isinstance(value, bool):
+        solved = value
+        known = True
+        status = "solved" if value else "unsolved"
+    else:
+        status = str(value or "").strip()
+        status_payload = {"challenge_id": challenge, "status": status}
+        known = _source_platform_solved_known(status_payload, platform_status=status, platform_submission={})
+        solved = _source_platform_solved(status_payload, platform_status=status, platform_submission={})
+    if not challenge or not known:
+        return None
+    return {"challenge": challenge, "solved": solved, "known": known, "status": redact_text(status)[:120], "source": source}
+
+
+def _platform_solved_record_from_mapping(item: Mapping[str, Any], *, source: str) -> dict[str, Any] | None:
+    nested_challenge = item.get("challenge") or item.get("problem") or item.get("task")
+    nested: Mapping[str, Any] = nested_challenge if isinstance(nested_challenge, Mapping) else {}
+    challenge = str(
+        item.get("challenge_id")
+        or item.get("id")
+        or item.get("slug")
+        or item.get("canonical_id")
+        or nested.get("challenge_id")
+        or nested.get("id")
+        or nested.get("slug")
+        or nested.get("name")
+        or item.get("name")
+        or item.get("title")
+        or ""
+    ).strip()
+    if not challenge:
+        return None
+    platform_status = _source_platform_status(item)
+    platform_submission = _source_submission_summary(item)
+    known = _source_platform_solved_known(item, platform_status=platform_status, platform_submission=platform_submission)
+    if not known and nested:
+        platform_status = platform_status or _source_platform_status(nested)
+        platform_submission = platform_submission or _source_submission_summary(nested)
+        known = _source_platform_solved_known(nested, platform_status=platform_status, platform_submission=platform_submission)
+    if not known:
+        return None
+    solved = _source_platform_solved(item, platform_status=platform_status, platform_submission=platform_submission)
+    if not solved and nested:
+        solved = _source_platform_solved(nested, platform_status=platform_status, platform_submission=platform_submission)
+    aliases = _dedupe_strings(
+        [
+            str(item.get("alias") or ""),
+            str(item.get("slug") or ""),
+            str(item.get("name") or ""),
+            str(nested.get("slug") or ""),
+            str(nested.get("name") or ""),
+        ]
+    )
+    return {
+        "challenge": challenge,
+        "solved": solved,
+        "known": known,
+        "status": redact_text(str(platform_status or platform_submission.get("status") or ""))[:120],
+        "source": source,
+        "aliases": aliases,
+    }
+
+
+def _apply_platform_solved_records(
+    root: Path,
+    board: dict[str, Any],
+    records: Iterable[Mapping[str, Any]],
+    *,
+    available: bool,
+    source: str,
+    synced_at: str,
+) -> dict[str, Any]:
+    synced_ids: set[str] = set()
+    alias_resolved: set[str] = set()
+    for record in records:
+        challenge = str(record.get("challenge") or "").strip()
+        if not challenge:
+            continue
+        item = _find_challenge(board, challenge)
+        if item is None:
+            continue
+        item["platform_solved_known"] = True
+        if not bool(record.get("solved")):
+            continue
+        item["platform_solved"] = True
+        item["solved_by_platform"] = True
+        item["solved_synced_at"] = synced_at
+        if str(item.get("solved_source") or "") in {"", "platform"}:
+            item["solved_source"] = "platform"
+        if not item.get("solved_by_external"):
+            item["status"] = "solved"
+        aliases = _list_values(item.get("solved_aliases"))
+        if _record_resolved_alias(item, challenge):
+            aliases.append(challenge)
+            alias_resolved.add(_sync_key(item) or challenge)
+        for alias in _list_values(record.get("aliases")):
+            if alias and _record_resolved_alias(item, str(alias)):
+                aliases.append(str(alias))
+                alias_resolved.add(_sync_key(item) or challenge)
+        item["solved_aliases"] = _dedupe_strings(aliases)
+        synced_ids.add(_sync_key(item) or _normalize(challenge))
+    countable_items = [item for item in board.get("challenges", []) if isinstance(item, Mapping) and _status_countable_item(item)]
+    metadata = {
+        "available": bool(available),
+        "source": source,
+        "solved_status_source": source,
+        "last_synced_at": synced_at if available or source != "not_requested" else "",
+        "solved_synced_count": len(synced_ids),
+        "external_solved_count": sum(1 for item in countable_items if item.get("solved_by_external")),
+        "solved_by_platform_count": sum(1 for item in countable_items if item.get("solved_by_platform") or item.get("platform_solved")),
+        "solved_alias_resolved_count": len(alias_resolved),
+    }
+    board["solved_sync"] = metadata
+    return metadata
+
+
+def _refresh_solved_sync_counts(board: dict[str, Any], metadata: Mapping[str, Any]) -> dict[str, Any]:
+    countable_items = [item for item in board.get("challenges", []) if isinstance(item, Mapping) and _status_countable_item(item)]
+    refreshed = dict(metadata)
+    refreshed["external_solved_count"] = sum(1 for item in countable_items if item.get("solved_by_external"))
+    refreshed["solved_by_platform_count"] = sum(1 for item in countable_items if item.get("solved_by_platform") or item.get("platform_solved"))
+    board["solved_sync"] = refreshed
+    return refreshed
+
+
+def _record_resolved_alias(item: Mapping[str, Any], challenge: str) -> bool:
+    wanted = _normalize(challenge)
+    direct = {
+        _normalize(str(item.get("challenge_id") or "")),
+        _normalize(str(item.get("canonical_id") or "")),
+        _normalize(str(item.get("canonical_name") or "")),
+        _normalize(str(item.get("name") or "")),
+    }
+    return bool(wanted and wanted not in direct and wanted in _challenge_keys(item))
 
 
 def _links_are_only_static_assets(links: Iterable[Any]) -> bool:
@@ -2869,14 +3291,20 @@ def _merge_challenge_entry(previous: Mapping[str, Any], item: Mapping[str, Any])
         merged["submit_metadata"] = dict(previous["submit_metadata"])
     previous_status = str(previous.get("status") or "")
     item_status = str(item.get("status") or "")
-    if item.get("platform_solved") or item_status == "external_solved":
+    if item.get("platform_solved"):
+        merged["status"] = "solved"
+        merged["solved_by_platform"] = True
+        if str(previous.get("solved_source") or "") not in {"submit", "external_solved_txt", "manual"}:
+            merged["solved_source"] = "platform"
+    elif item_status == "external_solved":
         merged["status"] = "external_solved"
         merged["solved_by_external"] = True
+        merged.setdefault("solved_source", "external_solved_txt")
     elif previous_status in {"solved", "external_solved", "stalled", "claimed"}:
         merged["status"] = previous_status
         if previous_status == "external_solved":
             merged["solved_by_external"] = True
-    for key in ("claimed_by", "claimed_at", "solved_at", "flag_hash", "artifact_sha256", "stalled_reason"):
+    for key in ("claimed_by", "claimed_at", "solved_at", "solved_synced_at", "flag_hash", "artifact_sha256", "stalled_reason"):
         if key in previous and key not in item:
             merged[key] = previous[key]
     merged["claimable"] = _claimable_source(merged)
@@ -2897,7 +3325,12 @@ def _normalize_challenge_entry(item: Mapping[str, Any]) -> dict[str, Any]:
     normalized["is_alias"] = bool(normalized.get("is_alias", False))
     normalized["is_static_shell"] = bool(normalized.get("is_static_shell", False))
     normalized["is_static_alias"] = bool(normalized.get("is_static_alias", False))
+    normalized["platform_solved"] = bool(normalized.get("platform_solved", False))
+    normalized["platform_solved_known"] = bool(normalized.get("platform_solved_known", False))
+    normalized["solved_by_platform"] = bool(normalized.get("solved_by_platform", False))
     normalized["solved_by_external"] = bool(normalized.get("solved_by_external", False))
+    normalized["solved_aliases"] = _dedupe_strings(_list_values(normalized.get("solved_aliases")))
+    normalized["solved_source"] = str(normalized.get("solved_source") or "")
     normalized.setdefault("priority", 100)
     normalized.setdefault("status", "skipped" if normalized.get("is_static_shell") else "todo")
     normalized["claimable"] = _claimable_source(normalized)
@@ -2910,11 +3343,8 @@ def _challenge_text_for_ingest(challenge: Mapping[str, Any]) -> str:
 
 def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
     solved_ids = {_normalize(str(row.get("challenge_id"))) for row in _read_jsonl(root / "solved.jsonl") if row.get("challenge_id")}
-    external = (
-        {_normalize(line.strip()) for line in (root / "external_solved.txt").read_text(encoding="utf-8").splitlines() if line.strip()}
-        if (root / "external_solved.txt").exists()
-        else set()
-    )
+    external_lines = (root / "external_solved.txt").read_text(encoding="utf-8").splitlines() if (root / "external_solved.txt").exists() else []
+    external = {_normalize(line.strip()) for line in external_lines if line.strip()}
     stalled = {_normalize(str(row.get("challenge_id"))) for row in _read_jsonl(root / "stalled.jsonl") if row.get("challenge_id")}
     claimed = {_normalize(value) for value in _claimed_ids(root)}
     for item in board.get("challenges", []):
@@ -2923,13 +3353,22 @@ def _apply_runtime_statuses(root: Path, board: dict[str, Any]) -> None:
         item["claimable"] = _claimable_source(item)
         if keys & solved_ids:
             item["status"] = "solved"
+            item["solved_source"] = "submit"
             item["solved_by_external"] = False
         elif keys & external:
             item["status"] = "external_solved"
             item["solved_by_external"] = True
-        elif item.get("platform_solved"):
-            item["status"] = "external_solved"
-            item["solved_by_external"] = True
+            item["solved_source"] = "external_solved_txt"
+            item["solved_aliases"] = _dedupe_strings(
+                [
+                    *_list_values(item.get("solved_aliases")),
+                    *[line.strip() for line in external_lines if _normalize(line.strip()) in keys],
+                ]
+            )
+        elif item.get("platform_solved") or item.get("solved_by_platform"):
+            item["status"] = "solved"
+            item["solved_by_platform"] = True
+            item["solved_source"] = "platform"
         elif keys & claimed:
             item["status"] = "claimed"
         elif keys & stalled:
@@ -2960,6 +3399,8 @@ def _operator_status_summary(contest_id: str, root: Path, board: Mapping[str, An
     if skipped_static_count is None:
         skipped_static_count = sum(1 for item in board.get("challenges", []) if isinstance(item, Mapping) and (item.get("is_static_shell") or item.get("is_static_alias"))) + artifact_source_count
     claimable_count = sum(1 for item in items if _claimable(root, item))
+    solved_by_platform_count = sum(1 for item in items if item.get("solved_by_platform") or item.get("platform_solved"))
+    solved_by_external_count = sum(1 for item in items if item.get("solved_by_external"))
     active_claims, stale_claims = _claim_rows(root, board)
     counts = {
         "todo": len(buckets["todo"]),
@@ -2973,12 +3414,16 @@ def _operator_status_summary(contest_id: str, root: Path, board: Mapping[str, An
         "artifact_sources_count": artifact_source_count,
         "skipped_static_count": skipped_static_count,
         "claimable_count": claimable_count,
+        "solved_by_platform_count": solved_by_platform_count,
+        "solved_by_external_count": solved_by_external_count,
         "active_claim_count": len(active_claims),
         "stale_claim_count": len(stale_claims),
     }
     completion_status = _completion_status(root, board, counts)
     no_useful_work = completion_status in {"all_solved", "all_solved_or_stalled", "no_claimable"}
     profile_path = str(board.get("profile_path") or _operator_config(root).get("profile_path") or "")
+    solved_sync = board.get("solved_sync") if isinstance(board.get("solved_sync"), Mapping) else {}
+    solved_sync_available = bool(solved_sync.get("available") or any(item.get("platform_solved_known") for item in items))
     return {
         "status": "ok",
         "contest_id": contest_id,
@@ -2989,6 +3434,9 @@ def _operator_status_summary(contest_id: str, root: Path, board: Mapping[str, An
         "claimed": counts["claimed"],
         "solved": counts["solved"],
         "external_solved": counts["external_solved"],
+        "solved_by_platform_count": solved_by_platform_count,
+        "solved_by_external_count": solved_by_external_count,
+        "solved_sync_available": solved_sync_available,
         "stalled": counts["stalled"],
         "skipped": counts["skipped"],
         "alias_count": alias_count,
@@ -3004,6 +3452,7 @@ def _operator_status_summary(contest_id: str, root: Path, board: Mapping[str, An
         "canonical_map": board.get("canonical_map", {}),
         "profile_path": profile_path,
         "last_sync_at": board.get("last_sync_at") or "",
+        "solved_sync": solved_sync,
     }
 
 
@@ -3026,6 +3475,8 @@ def _completion_status(root: Path, board: Mapping[str, Any], counts: Mapping[str
 def _completion_item_status(root: Path, item: Mapping[str, Any]) -> str:
     if str(item.get("status") or "") == "external_solved" or item.get("solved_by_external"):
         return "external_solved"
+    if item.get("solved_by_platform") or item.get("platform_solved"):
+        return "solved"
     status = _challenge_status(root, item)
     if status in {"solved", "claimed", "stalled", "skipped"}:
         return status
@@ -3070,6 +3521,9 @@ def _compact_status_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
         "claimed",
         "solved",
         "external_solved",
+        "solved_by_platform_count",
+        "solved_by_external_count",
+        "solved_sync_available",
         "stalled",
         "skipped",
         "alias_count",
@@ -3157,11 +3611,11 @@ def _record_no_work_metrics(root: Path, contest_id: str, summary: Mapping[str, A
         )
 
 
-def _refresh_operator_once(contest_id: str, root: Path, profile: str | Path | None) -> dict[str, Any]:
+def _refresh_operator_once(contest_id: str, root: Path, profile: str | Path | None, *, pull_solved: bool = True) -> dict[str, Any]:
     resolved = _refresh_profile_path(root, profile)
     if not resolved:
         return {"status": "blocked", "contest_id": contest_id, "reason": "profile_required_for_refresh"}
-    return sync_operator(contest_id, profile=resolved, live=True)
+    return sync_operator(contest_id, profile=resolved, live=True, pull_solved=pull_solved)
 
 
 def _refresh_profile_path(root: Path, profile: str | Path | None) -> str | None:
@@ -3185,11 +3639,15 @@ def _claimable(root: Path, item: Mapping[str, Any]) -> bool:
 
 def _challenge_status(root: Path, item: Mapping[str, Any]) -> str:
     status = str(item.get("status") or "todo")
-    if status == "external_solved":
+    if status == "external_solved" or item.get("solved_by_external") or item.get("solved_by_platform") or item.get("platform_solved"):
         return "solved"
     if status in {"solved", "claimed", "stalled", "skipped"}:
         return status
     return "todo"
+
+
+def _item_solved_by_platform_or_external(item: Mapping[str, Any]) -> bool:
+    return bool(item.get("solved_by_external") or item.get("solved_by_platform") or item.get("platform_solved"))
 
 
 def _is_solved(root: Path, item: Mapping[str, Any]) -> bool:
@@ -3343,6 +3801,10 @@ def _sync_signatures(root: Path, items: Iterable[Mapping[str, Any]]) -> dict[str
             "artifact_sources": sorted(str(value) for value in _list_values(item.get("artifact_sources"))),
             "source_ids": sorted(str(value) for value in _list_values(item.get("source_ids"))),
             "platform_solved": bool(item.get("platform_solved")),
+            "solved_by_platform": bool(item.get("solved_by_platform")),
+            "solved_by_external": bool(item.get("solved_by_external")),
+            "solved_source": str(item.get("solved_source") or ""),
+            "solved_aliases": sorted(str(value) for value in _list_values(item.get("solved_aliases"))),
             "status": _completion_item_status(root, item),
             "claimable": bool(item.get("claimable", True)),
         }
@@ -5732,7 +6194,7 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
             solved_count += 1
             if challenge_id and timestamp and challenge_id in claim_times:
                 solve_durations.append((timestamp - claim_times[challenge_id]).total_seconds())
-        elif event in {"accepted", "solved", "external_solved"}:
+        elif event in {"accepted", "solved", "external_solved", "external_solved_recorded"}:
             solved_count += 1
             if event == "accepted":
                 accepted_count += 1
@@ -5808,7 +6270,7 @@ def _public_challenge_index(board: Mapping[str, Any], events: list[dict[str, Any
         )
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
         event = str(row.get("event") or "")
-        if event in {"submit", "accepted", "solved", "external_solved", "artifact_submit_accepted"}:
+        if event in {"submit", "accepted", "solved", "external_solved", "external_solved_recorded", "artifact_submit_accepted"}:
             item["status"] = "solved"
         elif event == "stalled" and item.get("status") != "solved":
             item["status"] = "stalled"
@@ -6193,7 +6655,11 @@ def _challenge_public(item: Mapping[str, Any]) -> dict[str, Any]:
         "source_ids": _list_values(item.get("source_ids")),
         "is_static_shell": bool(item.get("is_static_shell")),
         "claimable": bool(item.get("claimable", True)),
+        "solved_by_platform": bool(item.get("solved_by_platform") or item.get("platform_solved")),
         "solved_by_external": bool(item.get("solved_by_external")),
+        "solved_source": item.get("solved_source") or "",
+        "solved_synced_at": item.get("solved_synced_at") or "",
+        "solved_aliases": _list_values(item.get("solved_aliases")),
     }
 
 

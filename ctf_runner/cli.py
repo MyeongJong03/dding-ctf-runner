@@ -331,6 +331,7 @@ def _cmd_interactive_sync(args: argparse.Namespace) -> int:
         live=args.live,
         download=args.download,
         ingest=args.ingest,
+        pull_solved=args.pull_solved,
     )
     _print_json(data)
     return 0 if data.get("status") not in {"blocked", "error"} else 1
@@ -371,6 +372,7 @@ def _cmd_interactive_next(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         refresh=args.refresh,
         profile=args.profile,
+        pull_solved=args.pull_solved,
     )
     _print_json(data)
     return 0 if data.get("status") not in {"blocked", "error"} else 1
@@ -414,7 +416,14 @@ def _cmd_interactive_starter(args: argparse.Namespace) -> int:
 
 
 def _cmd_interactive_prepare_target(args: argparse.Namespace) -> int:
-    data = interactive_prepare_target(args.contest_id, agent=args.agent, challenge_id=args.challenge_id, refresh=args.refresh, profile=args.profile)
+    data = interactive_prepare_target(
+        args.contest_id,
+        agent=args.agent,
+        challenge_id=args.challenge_id,
+        refresh=args.refresh,
+        profile=args.profile,
+        pull_solved=args.pull_solved,
+    )
     _print_json(data)
     return 0 if data.get("status") == "ok" or data.get("no_useful_work") else 1
 
@@ -2199,10 +2208,11 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_init.set_defaults(func=_cmd_interactive_init)
     interactive_sync = interactive_sub.add_parser("sync")
     interactive_sync.add_argument("--contest-id", required=True)
-    interactive_sync.add_argument("--profile", required=True)
+    interactive_sync.add_argument("--profile")
     interactive_sync.add_argument("--live", action="store_true")
     interactive_sync.add_argument("--download", action="store_true")
     interactive_sync.add_argument("--ingest", action="store_true")
+    interactive_sync.add_argument("--pull-solved", action="store_true")
     interactive_sync.add_argument("--json", action="store_true")
     interactive_sync.set_defaults(func=_cmd_interactive_sync)
     interactive_board = interactive_sub.add_parser("board")
@@ -2228,6 +2238,7 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_next.add_argument("--dry-run", action="store_true")
     interactive_next.add_argument("--refresh", action="store_true")
     interactive_next.add_argument("--profile")
+    interactive_next.add_argument("--pull-solved", action="store_true")
     interactive_next.add_argument("--json", action="store_true")
     interactive_next.set_defaults(func=_cmd_interactive_next)
     interactive_target_pack = interactive_sub.add_parser("target-pack")
@@ -2255,6 +2266,7 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prepare_target.add_argument("--challenge-id")
     interactive_prepare_target.add_argument("--refresh", action="store_true")
     interactive_prepare_target.add_argument("--profile")
+    interactive_prepare_target.add_argument("--pull-solved", action="store_true")
     interactive_prepare_target.add_argument("--json", action="store_true")
     interactive_prepare_target.set_defaults(func=_cmd_interactive_prepare_target)
     interactive_run_attempt = interactive_sub.add_parser("run-attempt")
