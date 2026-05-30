@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
 import re
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -63,6 +66,9 @@ KEEP_NAMES = {
     "README.md",
 }
 PLAYBOOK_CATEGORIES = ("web", "pwn", "rev", "crypto", "forensics/misc", "osint", "ai/ml")
+SERVICE_TOKEN_SOURCES = ("none", "profile", "file", "env")
+SERVICE_TRANSPORTS = ("auto", "plain", "tls")
+SERVICE_TRANSCRIPT_LIMIT = 64 * 1024
 
 
 def init_operator(
@@ -540,6 +546,8 @@ def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None)
         return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
 
     context = _target_context(contest_id, root, item)
+    if context.get("service_metadata") and not _service_metadata_for_item(root, board, item, str(item.get("challenge_id") or challenge_id)):
+        _save_challenge_service_metadata(root, board, str(item.get("challenge_id") or challenge_id), context["service_metadata"])
     _attach_toolchain_context(root, contest_id, context)
     pack_path = root / "target-packs" / f"{_safe_slug(str(item.get('canonical_id') or item.get('challenge_id') or challenge_id))}.md"
     text = _render_target_pack(contest_id, item, context, agent=agent)
@@ -557,6 +565,7 @@ def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None)
         "brief_path": _display(context["brief_path"]) if context.get("brief_path") else "",
         "challenge_path": _display(context["challenge_dir"]),
         "remote_endpoint_count": len(context["remote_endpoints"]),
+        "service_metadata": _service_public_metadata(context.get("service_metadata") or {}) if context.get("service_metadata") else {},
         "toolchain": context.get("toolchain_summary") or {},
     }
 
@@ -1019,6 +1028,513 @@ def run_attempt(
     }
 
 
+def service_config(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    host: str | None = None,
+    port: int | None = None,
+    tls: bool = False,
+    plain: bool = False,
+    token_source: str | None = None,
+    token_file: str | Path | None = None,
+    token_env: str | None = None,
+    pow_helper: str | Path | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    if tls and plain:
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_id, "reason": "tls_and_plain_are_mutually_exclusive"}
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    context = _target_context(contest_id, root, item)
+    endpoint = _service_endpoint_from_args(host=host, port=port, tls=tls, plain=plain)
+    source = "cli"
+    if endpoint is None:
+        endpoint = _service_endpoint_from_context(context)
+        source = "challenge_metadata"
+    if endpoint is None:
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "reason": "service_endpoint_missing"}
+    if tls:
+        endpoint["transport"] = "tls"
+    elif plain:
+        endpoint["transport"] = "plain"
+
+    token = _normalize_service_token_source(token_source, token_file=token_file, token_env=token_env)
+    if token.get("status") != "ok":
+        return {
+            "status": "blocked",
+            "contest_id": contest_id,
+            "challenge_id": challenge_key,
+            "reason": token.get("reason") or "invalid_token_source",
+        }
+
+    metadata = _build_service_metadata(
+        challenge_key,
+        endpoint=endpoint,
+        endpoint_source=source,
+        token_source=token,
+        pow_helper=pow_helper,
+    )
+    warnings = _service_config_warnings(root, metadata)
+    metadata["warnings"] = warnings
+    _save_challenge_service_metadata(root, board, challenge_key, metadata)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="service_configured",
+        challenge_id=challenge_key,
+        data=_service_metric_payload(metadata, status="ok", extra={"warning_count": len(warnings)}),
+    )
+    return {
+        "status": "ok",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "metadata": _service_public_metadata(metadata),
+        "warnings": warnings,
+    }
+
+
+def service_probe(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    metadata = _ensure_service_metadata(root, board, item, challenge_key)
+    if not metadata:
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "reason": "service_endpoint_missing"}
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    timeout = max(1, int(timeout or 10))
+    started_at = utc_now()
+    probe = _service_probe_connection(metadata, timeout=timeout)
+    completed_at = utc_now()
+    transcript = _service_sanitize_text(str(probe.get("transcript") or ""))
+    prompts = _detect_service_prompts(transcript)
+    probe_dir = challenge_dir / "service" / "probes"
+    probe_path = probe_dir / f"{_timestamp_filename(started_at)}.json"
+    record = {
+        "schema": "interactive_service_probe_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "timeout_sec": timeout,
+        "endpoint": _service_endpoint_public(metadata),
+        "status": probe.get("status") or "error",
+        "transport": probe.get("transport") or _service_endpoint_public(metadata).get("transport"),
+        "connector": probe.get("connector") or "",
+        "error": _safe_public_note(str(probe.get("error") or ""), limit=240),
+        "banner": _service_text_preview(transcript, 4000),
+        "transcript": transcript,
+        "transcript_len": len(transcript),
+        "prompts": prompts,
+    }
+    _write_json_raw(probe_path, record)
+    _append_text(
+        challenge_dir / "attempts.md",
+        f"\n- service_probe: status={record['status']} transport={record['transport']} prompts={_service_prompt_summary(prompts)} record={_display(probe_path)} ({completed_at})\n",
+    )
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="service_probe_completed",
+        challenge_id=challenge_key,
+        data=_service_metric_payload(
+            metadata,
+            status=str(record["status"]),
+            extra={
+                "transport": record["transport"],
+                "token_prompt_detected": bool(prompts["token_prompt"]),
+                "pow_prompt_detected": bool(prompts["pow_prompt"]),
+                "menu_prompt_detected": bool(prompts["menu_prompt"]),
+                "transcript_len": len(transcript),
+                "probe_path": _display(probe_path),
+            },
+        ),
+    )
+    if prompts["token_prompt"]:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="service_token_prompt_detected",
+            challenge_id=challenge_key,
+            data=_service_metric_payload(metadata, status=str(record["status"])),
+        )
+    if prompts["pow_prompt"]:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="service_pow_prompt_detected",
+            challenge_id=challenge_key,
+            data=_service_metric_payload(metadata, status=str(record["status"])),
+        )
+    return {
+        "status": record["status"],
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "endpoint": record["endpoint"],
+        "transport": record["transport"],
+        "connector": record["connector"],
+        "banner": record["banner"],
+        "prompts": prompts,
+        "token_prompt_detected": bool(prompts["token_prompt"]),
+        "pow_prompt_detected": bool(prompts["pow_prompt"]),
+        "menu_prompt_detected": bool(prompts["menu_prompt"]),
+        "probe_path": _display(probe_path),
+        "error": record["error"],
+    }
+
+
+def service_attempt(
+    contest_id: str,
+    *,
+    challenge_id: str,
+    script: str | Path | None = None,
+    payload_file: str | Path | None = None,
+    timeout: int = 60,
+    agent: str | None = None,
+) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id) or {"challenge_id": challenge_id, "name": challenge_id, "category": ""}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    challenge_dir = _challenge_path(contest_id, item)
+    _ensure_challenge_memos(challenge_dir)
+    challenge_dir.mkdir(parents=True, exist_ok=True)
+    metadata = _ensure_service_metadata(root, board, item, challenge_key)
+    if not metadata:
+        _append_text(challenge_dir / "next_steps.md", f"\n- {utc_now()} service-attempt blocked: service endpoint missing\n")
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": "service_endpoint_missing"}
+
+    timeout = max(1, int(timeout or 60))
+    started = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="service_attempt_started",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_service_metric_payload(metadata, status="started", extra={"timeout_sec": timeout}),
+    )
+    started_at = str(started.get("timestamp") or utc_now())
+    attempt_dir = challenge_dir / "service" / "attempts"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    attempt_path = attempt_dir / f"{_timestamp_filename(started_at)}.json"
+
+    script_result = _run_service_payload_script(
+        script,
+        root=root,
+        challenge_dir=challenge_dir,
+        contest_id=contest_id,
+        challenge_id=challenge_key,
+        metadata=metadata,
+        timeout=timeout,
+    )
+    payload_result = _read_service_payload_file(payload_file, challenge_dir=challenge_dir)
+    if script_result.get("status") == "blocked" or payload_result.get("status") == "blocked":
+        reason = str(script_result.get("reason") or payload_result.get("reason") or "payload_unavailable")
+        return {"status": "blocked", "contest_id": contest_id, "challenge_id": challenge_key, "agent": agent or "", "reason": reason}
+    script_missing_tool = detect_missing_tool_failure(str(script_result.get("stdout") or ""), str(script_result.get("stderr") or ""))
+
+    secrets: list[str] = []
+    transcript_chunks: list[str] = []
+    token_injected = False
+    pow_injected = False
+    connection_status = "error"
+    transport = ""
+    connector = ""
+    error = ""
+    timed_out = False
+    start = time.perf_counter()
+    sock: socket.socket | ssl.SSLSocket | None = None
+    try:
+        if script_missing_tool:
+            connection_status = "missing_tool"
+            error = "missing_tool"
+            raise StopIteration
+        opened = _open_service_connection(metadata, timeout=timeout)
+        sock = opened["socket"]
+        transport = str(opened.get("transport") or "")
+        connector = str(opened.get("connector") or "")
+        initial = _service_recv_text(sock, timeout=min(timeout, 8), limit=SERVICE_TRANSCRIPT_LIMIT)
+        transcript_chunks.append(initial)
+        prompts = _detect_service_prompts(initial)
+        if prompts["token_prompt"]:
+            token_result = _read_service_token(root, metadata)
+            if token_result.get("status") != "ok":
+                connection_status = "blocked"
+                error = str(token_result.get("reason") or "service_token_unavailable")
+                _record_metrics_event(
+                    root,
+                    contest_id=contest_id,
+                    event="service_token_prompt_detected",
+                    agent=agent,
+                    challenge_id=challenge_key,
+                    data=_service_metric_payload(metadata, status="blocked"),
+                )
+            else:
+                token_value = str(token_result.get("value") or "")
+                if token_value:
+                    secrets.append(token_value)
+                    _service_send_line(sock, token_value.encode("utf-8", errors="replace"))
+                    token_injected = True
+                    transcript_chunks.append("[SERVICE_TOKEN_INJECTED]\n")
+                    transcript_chunks.append(_service_recv_text(sock, timeout=min(timeout, 8), limit=SERVICE_TRANSCRIPT_LIMIT))
+                    _record_metrics_event(
+                        root,
+                        contest_id=contest_id,
+                        event="service_token_prompt_detected",
+                        agent=agent,
+                        challenge_id=challenge_key,
+                        data=_service_metric_payload(metadata, status="injected"),
+                    )
+        if connection_status != "blocked":
+            current = "".join(transcript_chunks)
+            prompts = _detect_service_prompts(current)
+            if prompts["pow_prompt"]:
+                pow_result = _run_service_pow_helper(metadata, current, timeout=timeout, challenge_dir=challenge_dir)
+                if pow_result.get("status") == "ok" and pow_result.get("solution"):
+                    _service_send_line(sock, str(pow_result["solution"]).encode("utf-8", errors="replace"))
+                    pow_injected = True
+                    transcript_chunks.append("[SERVICE_POW_RESPONSE_INJECTED]\n")
+                    transcript_chunks.append(_service_recv_text(sock, timeout=min(timeout, 8), limit=SERVICE_TRANSCRIPT_LIMIT))
+                else:
+                    connection_status = "blocked"
+                    error = str(pow_result.get("reason") or "service_pow_unavailable")
+                _record_metrics_event(
+                    root,
+                    contest_id=contest_id,
+                    event="service_pow_prompt_detected",
+                    agent=agent,
+                    challenge_id=challenge_key,
+                    data=_service_metric_payload(metadata, status="injected" if pow_injected else "blocked"),
+                )
+        if connection_status != "blocked":
+            payloads = []
+            payloads.extend(payload_result.get("payloads") or [])
+            payloads.extend(script_result.get("payloads") or [])
+            for payload in payloads:
+                data = bytes(payload)
+                if data and not data.endswith(b"\n"):
+                    data += b"\n"
+                if data:
+                    sock.sendall(data)
+            if payloads:
+                transcript_chunks.append(f"[SERVICE_PAYLOAD_SENT bytes={sum(len(bytes(item)) for item in payloads)}]\n")
+                transcript_chunks.append(_service_recv_text(sock, timeout=min(timeout, 8), limit=SERVICE_TRANSCRIPT_LIMIT))
+            connection_status = "ok"
+    except TimeoutError:
+        timed_out = True
+        connection_status = "timeout"
+        error = "timeout"
+    except StopIteration:
+        pass
+    except OSError as exc:
+        connection_status = "error"
+        error = _safe_public_note(str(exc), limit=240)
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    runtime_sec = round(time.perf_counter() - start, 3)
+    completed_at = utc_now()
+    raw_transcript = "".join(transcript_chunks)
+    stdout = _service_sanitize_text(str(script_result.get("stdout") or ""), secrets=secrets)
+    stderr = _service_sanitize_text(str(script_result.get("stderr") or ""), secrets=secrets)
+    transcript = _service_sanitize_text(raw_transcript, secrets=secrets)
+    command_display = _service_attempt_command_display(metadata, script=script, payload_file=payload_file)
+    policy = load_submit_policy()
+    detected = _detect_attempt_candidates(
+        contest_id,
+        challenge_key,
+        stdout="\n".join([transcript, stdout]),
+        stderr=stderr,
+        command=command_display,
+        attempt_path=attempt_path,
+        timestamp=completed_at,
+        policy=policy,
+    )
+    for row in detected:
+        if str(row.get("source") or "") == "attempt_stdout":
+            row["source"] = "service_transcript"
+            row["derivation"] = "detected by interactive service-attempt"
+        elif str(row.get("source") or "") == "attempt_stderr":
+            row["source"] = "service_script_stderr"
+            row["derivation"] = "detected by interactive service-attempt"
+    stored_candidates = _append_detected_candidates(challenge_dir, detected)
+    attempt_record = {
+        "schema": "interactive_service_attempt_v1",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "cwd": _display(challenge_dir),
+        "command": command_display,
+        "script": _display(Path(script).expanduser()) if script else "",
+        "payload_file": _display(Path(payload_file).expanduser()) if payload_file else "",
+        "timeout_sec": timeout,
+        "timed_out": timed_out,
+        "returncode": script_result.get("returncode"),
+        "runtime_sec": runtime_sec,
+        "endpoint": _service_endpoint_public(metadata),
+        "transport": transport,
+        "connector": connector,
+        "token_injected": token_injected,
+        "pow_injected": pow_injected,
+        "transcript": transcript,
+        "transcript_len": len(transcript),
+        "stdout": stdout,
+        "stderr": stderr,
+        "stdout_len": len(stdout),
+        "stderr_len": len(stderr),
+        "error": error,
+        "missing_tool": script_missing_tool or {},
+        "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+        "candidate_count": len(detected),
+        "stored_candidate_count": len(stored_candidates),
+        "attempt_kind": "service",
+    }
+    _write_json_raw(attempt_path, attempt_record)
+    _append_attempt_markdown(challenge_dir, attempt_record, attempt_path, detected)
+    _append_attempt_evidence(challenge_dir, attempt_record, attempt_path, detected)
+    if script_missing_tool:
+        _append_missing_tool_notes(challenge_dir, script_missing_tool, attempt_path)
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="missing_tool_observed",
+            agent=agent,
+            challenge_id=challenge_key,
+            data=_missing_tool_metric_payload(script_missing_tool),
+        )
+    if detected:
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="service_candidate_found",
+            agent=agent,
+            challenge_id=challenge_key,
+            data={
+                "candidate_count": len(detected),
+                "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+                "sources": _dedupe_strings(str(row.get("source") or "") for row in detected),
+            },
+        )
+    completed_event = _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="service_attempt_completed",
+        agent=agent,
+        challenge_id=challenge_key,
+        data=_service_metric_payload(
+            metadata,
+            status=connection_status,
+            extra={
+                "transport": transport,
+                "runtime_sec": runtime_sec,
+                "timed_out": timed_out,
+                "token_injected": token_injected,
+                "pow_injected": pow_injected,
+                "transcript_len": len(transcript),
+                "stdout_len": len(stdout),
+                "stderr_len": len(stderr),
+                "candidate_count": len(detected),
+                "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
+                "attempt_path": _display(attempt_path),
+            },
+        ),
+    )
+    return {
+        "status": connection_status,
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "agent": agent or "",
+        "attempt_path": _display(attempt_path),
+        "cwd": _display(challenge_dir),
+        "endpoint": _service_endpoint_public(metadata),
+        "transport": transport,
+        "connector": connector,
+        "command": command_display,
+        "returncode": script_result.get("returncode"),
+        "runtime_sec": runtime_sec,
+        "timed_out": timed_out,
+        "token_injected": token_injected,
+        "pow_injected": pow_injected,
+        "transcript": transcript,
+        "stdout": stdout,
+        "stderr": stderr,
+        "error": error,
+        "missing_tool": script_missing_tool or {},
+        "candidates": [_candidate_local_payload(row) for row in detected],
+        "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
+        "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
+        "attempt_kind": "service",
+    }
+
+
+def service_status(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    board = _read_board(root, contest_id)
+    _apply_runtime_statuses(root, board)
+    item = _find_challenge(board, challenge_id)
+    if item is None:
+        return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
+    challenge_key = str(item.get("challenge_id") or challenge_id)
+    metadata = _service_metadata_for_item(root, board, item, challenge_key)
+    derived = False
+    if not metadata:
+        context = _target_context(contest_id, root, item)
+        endpoint = _service_endpoint_from_context(context)
+        if endpoint:
+            metadata = _build_service_metadata(
+                challenge_key,
+                endpoint=endpoint,
+                endpoint_source="challenge_metadata",
+                token_source={"type": "none"},
+                pow_helper=None,
+            )
+            derived = True
+    challenge_dir = _challenge_path(contest_id, item)
+    last_probe = _last_service_record(challenge_dir / "service" / "probes")
+    last_attempt = _last_service_record(challenge_dir / "service" / "attempts")
+    token_present = _service_token_source_present(root, metadata) if metadata else False
+    return {
+        "status": "ok" if metadata else "unconfigured",
+        "contest_id": contest_id,
+        "challenge_id": challenge_key,
+        "configured": bool(metadata and not derived),
+        "derived_from_challenge_metadata": derived,
+        "endpoint": _service_endpoint_public(metadata) if metadata else {},
+        "recommended_connect_command": metadata.get("recommended_connect_command") if metadata else "",
+        "last_probe": _service_record_summary(last_probe),
+        "last_attempt": _service_record_summary(last_attempt),
+        "prompt_type": _service_prompt_summary((last_probe or {}).get("prompts") if isinstance(last_probe, Mapping) else {}),
+        "token_source": _service_public_token_source(metadata) if metadata else {"type": "none"},
+        "token_source_present": token_present,
+        "pow_helper_present": bool(metadata and (metadata.get("pow_helper") or {}).get("path")),
+    }
+
+
 def list_candidates(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
     init_operator(contest_id)
     root = operator_root(contest_id)
@@ -1181,14 +1697,25 @@ def solve_loop(
     verifications: list[dict[str, Any]] = []
     submit_results: list[dict[str, Any]] = []
     limit = max(1, int(max_attempts or 5))
+    service_metadata = _service_metadata_for_item(root, board, item, challenge_key)
+    use_service_attempt = _service_solve_loop_eligible(service_metadata)
     for attempt_index in range(1, limit + 1):
-        attempt = run_attempt(
-            contest_id,
-            challenge_id=challenge_key,
-            agent=agent,
-            script=starter_fs_path,
-            timeout=120,
-        )
+        if use_service_attempt:
+            attempt = service_attempt(
+                contest_id,
+                challenge_id=challenge_key,
+                agent=agent,
+                script=starter_fs_path,
+                timeout=120,
+            )
+        else:
+            attempt = run_attempt(
+                contest_id,
+                challenge_id=challenge_key,
+                agent=agent,
+                script=starter_fs_path,
+                timeout=120,
+            )
         attempts.append(attempt)
         if attempt.get("status") == "missing_tool":
             tool = str((attempt.get("missing_tool") or {}).get("tool") or "unknown")
@@ -4129,9 +4656,25 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
     scan_paths = _existing_named_files(candidate_dirs, ("manifest/scan.json",))
     memo_summaries = _memo_summaries(challenge_dir)
     remote_endpoints = _remote_endpoints(item, brief_path=brief_path)
+    service_metadata = _service_metadata_for_item(root, {"challenges": [item]}, item, str(item.get("challenge_id") or ""))
+    if not service_metadata:
+        service_endpoint = None
+        for endpoint_text in remote_endpoints:
+            service_endpoint = _parse_service_endpoint(str(endpoint_text))
+            if service_endpoint:
+                break
+        if service_endpoint:
+            service_metadata = _build_service_metadata(
+                str(item.get("challenge_id") or ""),
+                endpoint=service_endpoint,
+                endpoint_source="challenge_metadata",
+                token_source={"type": "none"},
+                pow_helper=None,
+            )
     category_guess = _category_guess(item, candidate_dirs, scan_paths=scan_paths, has_remote=bool(remote_endpoints))
     top_files = _top_interesting_files(candidate_dirs, manifest_paths=manifest_paths, scan_paths=scan_paths)
     return {
+        "contest_id": contest_id,
         "operator_root": root,
         "challenge_dir": challenge_dir,
         "candidate_dirs": candidate_dirs,
@@ -4142,6 +4685,7 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
         "scan_paths": scan_paths,
         "memo_summaries": memo_summaries,
         "remote_endpoints": remote_endpoints,
+        "service_metadata": service_metadata,
         "category_guess": category_guess,
         "top_files": top_files,
     }
@@ -4311,8 +4855,8 @@ def _remote_endpoints(item: Mapping[str, Any], *, brief_path: Path | None) -> li
     for text in texts:
         safe = _target_safe_text(text)
         endpoints.extend(match.group(0).rstrip(").,]") for match in re.finditer(r"https?://[^\s'\"<>]+", safe))
-        for match in re.finditer(r"(?i)\b(?:nc|ncat|netcat)\s+([A-Za-z0-9_.-]+)\s+([0-9]{2,5})", safe):
-            endpoints.append(f"nc {match.group(1)} {match.group(2)}")
+        for match in re.finditer(r"(?i)\b(?:nc|ncat|netcat)\s+((?:--ssl|-ssl|--tls|-tls)\s+)?([A-Za-z0-9_.-]+)\s+([0-9]{2,5})", safe):
+            endpoints.append(f"ncat {'--ssl ' if match.group(1) else ''}{match.group(2)} {match.group(3)}")
         for match in re.finditer(r"\b((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost|127(?:\.\d{1,3}){3}):([0-9]{2,5})\b", safe):
             endpoints.append(f"{match.group(1)}:{match.group(2)}")
     return _dedupe_strings(endpoints)[:12]
@@ -4770,7 +5314,17 @@ def _category_triage_findings(
     top = [str(row.get("display_path") or row.get("path") or "") for row in files if not str(row.get("role") or "").startswith("memo:")][:6]
     if top:
         findings.append(_finding("files", "Top local files", "; ".join(top)))
-    if context.get("remote_endpoints"):
+    if context.get("service_metadata"):
+        service = _service_public_metadata(context["service_metadata"])
+        endpoint = service.get("endpoint") if isinstance(service.get("endpoint"), Mapping) else {}
+        findings.append(
+            _finding(
+                "remote_service",
+                "Remote service metadata",
+                f"{endpoint.get('host')}:{endpoint.get('port')} transport={endpoint.get('transport')} command={service.get('recommended_connect_command')}",
+            )
+        )
+    elif context.get("remote_endpoints"):
         findings.append(_finding("remote", "Remote endpoints in local metadata", "; ".join(str(value) for value in context["remote_endpoints"][:6])))
 
     if category == "web":
@@ -5010,7 +5564,11 @@ def _triage_next_steps(category: str, findings: list[dict[str, Any]], context: M
     }.get(category, [])
     if not findings or any("No category-specific signal" in str(row.get("title") or "") for row in findings):
         steps.insert(0, "Inspect brief.md and the top local files manually; add any concrete signal to evidence.md.")
-    if not context.get("remote_endpoints") and category in {"web", "pwn"}:
+    if context.get("service_metadata") or context.get("remote_endpoints"):
+        contest_id = str(context.get("contest_id") or "<contest>")
+        challenge_id = str((context.get("service_metadata") or {}).get("challenge_id") or "<challenge>")
+        steps.append(f"Probe the remote service with ctfctl interactive service-probe --contest-id {contest_id} --challenge-id {challenge_id} --json before manual payload work.")
+    elif not context.get("remote_endpoints") and category in {"web", "pwn"}:
         steps.append("Find or record service connection info before remote testing.")
     toolchain = context.get("toolchain_summary") if isinstance(context.get("toolchain_summary"), Mapping) else {}
     for row in list(toolchain.get("recommended_fallbacks") or [])[:3]:
@@ -5529,6 +6087,668 @@ def _save_challenge_solver_metadata(root: Path, board: dict[str, Any], challenge
     _save_challenge_local_metadata(root, board, challenge_id, "challenge_solver_metadata", "solver_metadata", metadata)
 
 
+def _save_challenge_service_metadata(root: Path, board: dict[str, Any], challenge_id: str, metadata: Mapping[str, Any]) -> None:
+    _save_challenge_local_metadata(root, board, challenge_id, "challenge_service_metadata", "service_metadata", _service_public_metadata(metadata))
+
+
+def _ensure_service_metadata(root: Path, board: dict[str, Any], item: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
+    metadata = _service_metadata_for_item(root, board, item, challenge_id)
+    if metadata:
+        return metadata
+    context = _target_context(str(board.get("contest_id") or ""), root, item)
+    endpoint = _service_endpoint_from_context(context)
+    if not endpoint:
+        return {}
+    metadata = _build_service_metadata(
+        challenge_id,
+        endpoint=endpoint,
+        endpoint_source="challenge_metadata",
+        token_source={"type": "none"},
+        pow_helper=None,
+    )
+    _save_challenge_service_metadata(root, board, challenge_id, metadata)
+    return metadata
+
+
+def _service_metadata_for_item(root: Path, board: Mapping[str, Any], item: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
+    keys = _challenge_keys(item) | {_normalize(challenge_id)}
+    sources: list[Any] = []
+    config = _operator_config(root)
+    sources.append(config.get("challenge_service_metadata") if isinstance(config.get("challenge_service_metadata"), Mapping) else {})
+    sources.append(board.get("service_metadata") if isinstance(board.get("service_metadata"), Mapping) else {})
+    if isinstance(item.get("service_metadata"), Mapping):
+        sources.append({challenge_id: item.get("service_metadata")})
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, metadata in source.items():
+            if _normalize(str(key)) not in keys or not isinstance(metadata, Mapping):
+                continue
+            normalized = _normalize_service_metadata(metadata)
+            if normalized:
+                return normalized
+    return {}
+
+
+def _normalize_service_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    endpoint = metadata.get("endpoint") if isinstance(metadata.get("endpoint"), Mapping) else metadata
+    host = str(endpoint.get("host") or metadata.get("host") or "").strip()
+    port = _int_value(endpoint.get("port") or metadata.get("port"))
+    if not host or not port:
+        return {}
+    transport = str(endpoint.get("transport") or endpoint.get("protocol") or metadata.get("transport") or "auto").lower()
+    if transport not in SERVICE_TRANSPORTS:
+        transport = "tls" if str(transport).lower() in {"ssl", "https"} else "auto"
+    token_source = metadata.get("token_source") if isinstance(metadata.get("token_source"), Mapping) else {}
+    pow_helper = metadata.get("pow_helper") if isinstance(metadata.get("pow_helper"), Mapping) else {}
+    normalized_endpoint = {
+        "host": host,
+        "port": int(port),
+        "transport": transport,
+        "locality": str(endpoint.get("locality") or metadata.get("locality") or _service_host_locality(host)),
+        "source": str(endpoint.get("source") or metadata.get("endpoint_source") or metadata.get("source") or ""),
+        "raw": _service_sanitize_text(str(endpoint.get("raw") or metadata.get("raw") or "")),
+    }
+    result = {
+        "schema": "interactive_service_metadata_v1",
+        "challenge_id": str(metadata.get("challenge_id") or ""),
+        "endpoint": normalized_endpoint,
+        "token_source": _service_public_token_source({"token_source": token_source}),
+        "pow_helper": {"path": str(pow_helper.get("path") or "")} if pow_helper.get("path") else {},
+        "recommended_connect_command": str(metadata.get("recommended_connect_command") or _service_recommended_connect_command(normalized_endpoint)),
+        "updated_at": str(metadata.get("updated_at") or ""),
+        "warnings": [str(item) for item in _list_values(metadata.get("warnings"))],
+    }
+    return result
+
+
+def _service_endpoint_from_args(*, host: str | None, port: int | None, tls: bool, plain: bool) -> dict[str, Any] | None:
+    if not host and port is None:
+        return None
+    if not host or port is None:
+        return None
+    transport = "tls" if tls else ("plain" if plain else "auto")
+    return {
+        "host": str(host).strip(),
+        "port": int(port),
+        "transport": transport,
+        "source": "cli",
+        "raw": f"{host}:{port}",
+    }
+
+
+def _service_endpoint_from_context(context: Mapping[str, Any]) -> dict[str, Any] | None:
+    service = context.get("service_metadata") if isinstance(context.get("service_metadata"), Mapping) else {}
+    endpoint = service.get("endpoint") if isinstance(service.get("endpoint"), Mapping) else {}
+    if endpoint.get("host") and endpoint.get("port"):
+        return dict(endpoint)
+    for endpoint_text in context.get("remote_endpoints") or []:
+        parsed = _parse_service_endpoint(str(endpoint_text))
+        if parsed:
+            return parsed
+    return None
+
+
+def _parse_service_endpoint(value: str) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme in {"http", "https", "tcp", "tls", "ssl"} and parsed.hostname:
+        port = parsed.port or (443 if parsed.scheme in {"https", "tls", "ssl"} else 80)
+        return {
+            "host": parsed.hostname,
+            "port": int(port),
+            "transport": "tls" if parsed.scheme in {"https", "tls", "ssl"} else "plain",
+            "source": "url",
+            "raw": text,
+        }
+    openssl = re.search(r"(?i)\bopenssl\s+s_client\b.*?\s-connect\s+([A-Za-z0-9_.-]+):([0-9]{1,5})", text)
+    if openssl:
+        return {"host": openssl.group(1), "port": int(openssl.group(2)), "transport": "tls", "source": "openssl", "raw": text}
+    nc = re.search(r"(?i)\b(?:nc|ncat|netcat)\s+((?:--ssl|-ssl|--tls|-tls)\s+)?([A-Za-z0-9_.-]+)\s+([0-9]{1,5})\b", text)
+    if nc:
+        return {
+            "host": nc.group(2),
+            "port": int(nc.group(3)),
+            "transport": "tls" if nc.group(1) else "plain",
+            "source": "netcat",
+            "raw": text,
+        }
+    host_port = re.search(r"\b((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0):([0-9]{1,5})\b", text)
+    if host_port:
+        return {
+            "host": host_port.group(1),
+            "port": int(host_port.group(2)),
+            "transport": "auto",
+            "source": "host_port",
+            "raw": text,
+        }
+    return None
+
+
+def _normalize_service_token_source(
+    token_source: str | None,
+    *,
+    token_file: str | Path | None,
+    token_env: str | None,
+) -> dict[str, Any]:
+    source = str(token_source or "").strip().lower()
+    if not source:
+        source = "file" if token_file else ("env" if token_env else "none")
+    if source not in SERVICE_TOKEN_SOURCES:
+        return {"status": "blocked", "reason": "invalid_token_source"}
+    result: dict[str, Any] = {"status": "ok", "type": source}
+    if source == "file":
+        if not token_file:
+            return {"status": "blocked", "reason": "token_file_required"}
+        result["file"] = _display(Path(token_file).expanduser())
+    elif source == "env":
+        if not token_env:
+            return {"status": "blocked", "reason": "token_env_required"}
+        result["env"] = str(token_env)
+    return result
+
+
+def _build_service_metadata(
+    challenge_id: str,
+    *,
+    endpoint: Mapping[str, Any],
+    endpoint_source: str,
+    token_source: Mapping[str, Any],
+    pow_helper: str | Path | None,
+) -> dict[str, Any]:
+    endpoint_data = {
+        "host": str(endpoint.get("host") or ""),
+        "port": int(endpoint.get("port") or 0),
+        "transport": str(endpoint.get("transport") or "auto") if str(endpoint.get("transport") or "auto") in SERVICE_TRANSPORTS else "auto",
+        "locality": _service_host_locality(str(endpoint.get("host") or "")),
+        "source": endpoint_source or str(endpoint.get("source") or ""),
+        "raw": _service_sanitize_text(str(endpoint.get("raw") or "")),
+    }
+    metadata = {
+        "schema": "interactive_service_metadata_v1",
+        "challenge_id": challenge_id,
+        "endpoint": endpoint_data,
+        "token_source": _service_public_token_source({"token_source": token_source}),
+        "pow_helper": {"path": _display(Path(pow_helper).expanduser())} if pow_helper else {},
+        "recommended_connect_command": _service_recommended_connect_command(endpoint_data),
+        "updated_at": utc_now(),
+    }
+    return metadata
+
+
+def _service_public_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_service_metadata(metadata) or dict(metadata)
+    return {
+        "schema": "interactive_service_metadata_v1",
+        "challenge_id": str(normalized.get("challenge_id") or metadata.get("challenge_id") or ""),
+        "endpoint": _service_endpoint_public(normalized),
+        "token_source": _service_public_token_source(normalized),
+        "pow_helper": dict(normalized.get("pow_helper") or {}) if isinstance(normalized.get("pow_helper"), Mapping) else {},
+        "recommended_connect_command": str(normalized.get("recommended_connect_command") or ""),
+        "updated_at": str(normalized.get("updated_at") or ""),
+        "warnings": [str(item) for item in _list_values(normalized.get("warnings"))],
+    }
+
+
+def _service_endpoint_public(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    endpoint = metadata.get("endpoint") if isinstance(metadata.get("endpoint"), Mapping) else metadata
+    host = str(endpoint.get("host") or "")
+    port = _int_value(endpoint.get("port")) or 0
+    transport = str(endpoint.get("transport") or "auto")
+    return {
+        "host": host,
+        "port": int(port),
+        "transport": transport if transport in SERVICE_TRANSPORTS else "auto",
+        "locality": str(endpoint.get("locality") or _service_host_locality(host)),
+        "source": str(endpoint.get("source") or ""),
+    }
+
+
+def _service_solve_loop_eligible(metadata: Mapping[str, Any]) -> bool:
+    if not metadata:
+        return False
+    endpoint = _service_endpoint_public(metadata)
+    # HTTP(S) URLs remain normal web targets unless the operator explicitly
+    # configured host/port service metadata.
+    return str(endpoint.get("source") or "") != "url"
+
+
+def _service_public_token_source(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    token = metadata.get("token_source") if isinstance(metadata.get("token_source"), Mapping) else metadata
+    source = str(token.get("type") or token.get("source") or "none").lower()
+    if source not in SERVICE_TOKEN_SOURCES:
+        source = "none"
+    result: dict[str, Any] = {"type": source}
+    if source == "file" and token.get("file"):
+        result["file"] = str(token.get("file"))
+    if source == "env" and token.get("env"):
+        result["env"] = str(token.get("env"))
+    return result
+
+
+def _service_host_locality(host: str) -> str:
+    value = str(host or "").strip().strip("[]").lower()
+    if value in {"localhost", "0.0.0.0"}:
+        return "local"
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return "public"
+    if ip.is_loopback:
+        return "local"
+    if ip.is_private:
+        return "private"
+    return "public"
+
+
+def _service_recommended_connect_command(endpoint: Mapping[str, Any]) -> str:
+    host = str(endpoint.get("host") or "")
+    port = str(endpoint.get("port") or "")
+    if not host or not port:
+        return ""
+    transport = str(endpoint.get("transport") or "auto")
+    if transport == "tls":
+        return f"openssl s_client -connect {shlex.quote(host)}:{shlex.quote(port)} -servername {shlex.quote(host)} -quiet"
+    if transport == "plain":
+        return f"nc {shlex.quote(host)} {shlex.quote(port)}"
+    return f"ctfctl interactive service-probe --contest-id <contest> --challenge-id <challenge> --json"
+
+
+def _service_config_warnings(root: Path, metadata: Mapping[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    endpoint = _service_endpoint_public(metadata)
+    host = str(endpoint.get("host") or "").lower()
+    profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+    if profile_path and profile_path != "TODO":
+        loaded = load_config_metadata(_expand_display_path(profile_path))
+        data = loaded.get("data") if isinstance(loaded.get("data"), Mapping) else {}
+        base_url = str(data.get("base_url") or data.get("url") or "")
+        base_host = urllib.parse.urlparse(base_url).hostname if base_url else ""
+        if base_host and host and host != base_host.lower() and not host.endswith("." + base_host.lower()):
+            warnings.append("remote_service_host_differs_from_platform_profile_origin")
+    return warnings
+
+
+def _service_probe_connection(metadata: Mapping[str, Any], *, timeout: int) -> dict[str, Any]:
+    endpoint = _service_endpoint_public(metadata)
+    transport = str(endpoint.get("transport") or "auto")
+    transports = ["tls", "plain"] if transport == "auto" else [transport]
+    errors: list[str] = []
+    for attempt_transport in transports:
+        try:
+            opened = _open_service_connection(metadata, timeout=timeout, transport_override=attempt_transport)
+            sock = opened["socket"]
+            try:
+                transcript = _service_recv_text(sock, timeout=timeout, limit=SERVICE_TRANSCRIPT_LIMIT)
+            finally:
+                sock.close()
+            return {
+                "status": "ok",
+                "transport": opened.get("transport") or attempt_transport,
+                "connector": opened.get("connector") or "",
+                "transcript": transcript,
+            }
+        except OSError as exc:
+            errors.append(f"{attempt_transport}:{_safe_public_note(str(exc), limit=160)}")
+            continue
+    return {"status": "error", "transport": transport, "connector": "", "transcript": "", "error": "; ".join(errors)}
+
+
+def _open_service_connection(
+    metadata: Mapping[str, Any],
+    *,
+    timeout: int,
+    transport_override: str | None = None,
+) -> dict[str, Any]:
+    endpoint = _service_endpoint_public(metadata)
+    host = str(endpoint.get("host") or "")
+    port = int(endpoint.get("port") or 0)
+    transport = transport_override or str(endpoint.get("transport") or "auto")
+    if transport == "auto":
+        transport = "tls"
+    raw = socket.create_connection((host, port), timeout=max(1, timeout))
+    raw.settimeout(max(1, timeout))
+    if transport == "tls":
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        wrapped = context.wrap_socket(raw, server_hostname=host)
+        wrapped.settimeout(max(1, timeout))
+        return {"socket": wrapped, "transport": "tls", "connector": "python_ssl"}
+    return {"socket": raw, "transport": "plain", "connector": "python_socket"}
+
+
+def _service_recv_text(sock: socket.socket | ssl.SSLSocket, *, timeout: int, limit: int) -> str:
+    chunks: list[bytes] = []
+    start = time.monotonic()
+    deadline = start + max(0.2, float(timeout))
+    idle_deadline: float | None = None
+    while sum(len(chunk) for chunk in chunks) < limit:
+        now = time.monotonic()
+        active_deadline = idle_deadline or deadline
+        if now >= active_deadline:
+            break
+        sock.settimeout(max(0.05, min(0.25, active_deadline - now)))
+        try:
+            chunk = sock.recv(min(4096, limit - sum(len(item) for item in chunks)))
+        except (TimeoutError, socket.timeout):
+            if chunks:
+                break
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        idle_deadline = time.monotonic() + 0.25
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def _service_send_line(sock: socket.socket | ssl.SSLSocket, data: bytes) -> None:
+    sock.sendall(data.rstrip(b"\r\n") + b"\n")
+
+
+def _detect_service_prompts(text: str) -> dict[str, Any]:
+    body = str(text or "")
+    token = bool(
+        re.search(
+            r"(?i)(team\s+token|service\s+token|enter\s+(?:your\s+)?token|provide\s+(?:team\s+)?token|token\s*[:?>])",
+            body,
+        )
+    )
+    pow_prompt = bool(re.search(r"(?i)(proof[- ]of[- ]work|\bpow\b|hashcash|solve\s+.*(?:sha|hash)|nonce)", body))
+    menu = bool(re.search(r"(?m)(?:^|\n)\s*(?:>|choice\s*[:?]|option\s*[:?]|\[[0-9]+\])", body) or body.rstrip().endswith((">", ":")))
+    prompt_type = "none"
+    if token:
+        prompt_type = "token"
+    elif pow_prompt:
+        prompt_type = "pow"
+    elif menu:
+        prompt_type = "menu"
+    return {"token_prompt": token, "pow_prompt": pow_prompt, "menu_prompt": menu, "prompt_type": prompt_type}
+
+
+def _service_prompt_summary(prompts: Mapping[str, Any] | None) -> str:
+    prompts = prompts or {}
+    values = []
+    if prompts.get("token_prompt"):
+        values.append("token")
+    if prompts.get("pow_prompt"):
+        values.append("pow")
+    if prompts.get("menu_prompt"):
+        values.append("menu")
+    return ",".join(values) if values else str(prompts.get("prompt_type") or "none")
+
+
+def _read_service_token(root: Path, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    token = _service_public_token_source(metadata)
+    source = str(token.get("type") or "none")
+    try:
+        if source == "none":
+            return {"status": "blocked", "reason": "service_token_source_not_configured"}
+        if source == "file":
+            path = _undisplay_path(str(token.get("file") or ""))
+            if not path.exists():
+                return {"status": "blocked", "reason": "service_token_file_missing"}
+            return {"status": "ok", "value": path.read_text(encoding="utf-8").strip()}
+        if source == "env":
+            name = str(token.get("env") or "")
+            if not name or name not in os.environ:
+                return {"status": "blocked", "reason": "service_token_env_missing"}
+            return {"status": "ok", "value": os.environ.get(name, "")}
+        if source == "profile":
+            profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+            if not profile_path or profile_path == "TODO":
+                return {"status": "blocked", "reason": "profile_missing_for_service_token"}
+            secret = load_auth_secret(_expand_display_path(profile_path), live=True)
+            text = getattr(secret, "_secret_text", None)
+            if not text:
+                return {"status": "blocked", "reason": "profile_auth_does_not_expose_text_token"}
+            return {"status": "ok", "value": str(text).strip()}
+    except (OSError, ValueError, KeyError) as exc:
+        return {"status": "blocked", "reason": _safe_public_note(str(exc), limit=160)}
+    return {"status": "blocked", "reason": "service_token_source_not_supported"}
+
+
+def _service_token_source_present(root: Path, metadata: Mapping[str, Any] | None) -> bool:
+    if not metadata:
+        return False
+    token = _service_public_token_source(metadata)
+    source = str(token.get("type") or "none")
+    if source == "file":
+        return bool(token.get("file") and _undisplay_path(str(token.get("file"))).exists())
+    if source == "env":
+        return bool(token.get("env") and str(token.get("env")) in os.environ)
+    if source == "profile":
+        profile_path = str(_operator_config(root).get("profile_path") or "").strip()
+        if not profile_path or profile_path == "TODO":
+            return False
+        metadata = load_auth_metadata(_expand_display_path(profile_path))
+        return bool(metadata.get("usable") or metadata.get("effective_method"))
+    return False
+
+
+def _run_service_pow_helper(metadata: Mapping[str, Any], prompt: str, *, timeout: int, challenge_dir: Path) -> dict[str, Any]:
+    helper = metadata.get("pow_helper") if isinstance(metadata.get("pow_helper"), Mapping) else {}
+    raw_path = str(helper.get("path") or "")
+    if not raw_path:
+        return {"status": "blocked", "reason": "pow_helper_missing"}
+    path = _undisplay_path(raw_path)
+    if not path.exists():
+        return {"status": "blocked", "reason": "pow_helper_not_found"}
+    endpoint = _service_endpoint_public(metadata)
+    env = os.environ.copy()
+    env.update(_service_script_env(metadata, root=None, contest_id="", challenge_id=""))
+    try:
+        completed = subprocess.run(
+            _script_argv(path),
+            cwd=challenge_dir,
+            input=prompt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=max(1, min(timeout, 30)),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "blocked", "reason": _safe_public_note(str(exc), limit=160)}
+    solution = (completed.stdout or "").strip().splitlines()
+    if completed.returncode != 0 or not solution:
+        return {"status": "blocked", "reason": "pow_helper_failed", "returncode": completed.returncode}
+    return {
+        "status": "ok",
+        "solution": solution[-1],
+        "returncode": completed.returncode,
+        "stdout_len": len(completed.stdout or ""),
+        "stderr_len": len(completed.stderr or ""),
+        "endpoint": endpoint,
+    }
+
+
+def _run_service_payload_script(
+    script: str | Path | None,
+    *,
+    root: Path,
+    challenge_dir: Path,
+    contest_id: str,
+    challenge_id: str,
+    metadata: Mapping[str, Any],
+    timeout: int,
+) -> dict[str, Any]:
+    if not script:
+        return {"status": "ok", "payloads": [], "stdout": "", "stderr": "", "returncode": None}
+    path = Path(script).expanduser()
+    if not path.is_absolute():
+        path = challenge_dir / path
+    if not path.exists():
+        return {"status": "blocked", "reason": "script_not_found"}
+    env = os.environ.copy()
+    env.update(_service_script_env(metadata, root=root, contest_id=contest_id, challenge_id=challenge_id))
+    try:
+        completed = subprocess.run(
+            _script_argv(path),
+            cwd=challenge_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+            timeout=max(1, min(timeout, 120)),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "ok",
+            "payloads": [_process_output_bytes(exc.stdout)] if exc.stdout else [],
+            "stdout": _process_output_text(exc.stdout),
+            "stderr": _process_output_text(exc.stderr),
+            "returncode": None,
+            "timed_out": True,
+        }
+    except OSError as exc:
+        return {"status": "blocked", "reason": _safe_public_note(str(exc), limit=160)}
+    stdout_bytes = completed.stdout or b""
+    return {
+        "status": "ok",
+        "payloads": [stdout_bytes] if stdout_bytes else [],
+        "stdout": _process_output_text(stdout_bytes),
+        "stderr": _process_output_text(completed.stderr),
+        "returncode": int(completed.returncode),
+    }
+
+
+def _read_service_payload_file(payload_file: str | Path | None, *, challenge_dir: Path) -> dict[str, Any]:
+    if not payload_file:
+        return {"status": "ok", "payloads": []}
+    path = Path(payload_file).expanduser()
+    if not path.is_absolute():
+        path = challenge_dir / path
+    if not path.exists():
+        return {"status": "blocked", "reason": "payload_file_not_found"}
+    try:
+        return {"status": "ok", "payloads": [path.read_bytes()]}
+    except OSError as exc:
+        return {"status": "blocked", "reason": _safe_public_note(str(exc), limit=160)}
+
+
+def _service_script_env(
+    metadata: Mapping[str, Any],
+    *,
+    root: Path | None,
+    contest_id: str,
+    challenge_id: str,
+) -> dict[str, str]:
+    endpoint = _service_endpoint_public(metadata)
+    token = _service_public_token_source(metadata)
+    env = {
+        "CTF_CONTEST_ID": contest_id,
+        "CTF_CHALLENGE_ID": challenge_id,
+        "CTF_SERVICE_HOST": str(endpoint.get("host") or ""),
+        "CTF_SERVICE_PORT": str(endpoint.get("port") or ""),
+        "CTF_SERVICE_TRANSPORT": str(endpoint.get("transport") or "auto"),
+        "CTF_SERVICE_TLS": "1" if endpoint.get("transport") == "tls" else "0",
+        "CTF_SERVICE_ENDPOINT": f"{endpoint.get('host')}:{endpoint.get('port')}",
+        "CTF_SERVICE_TOKEN_SOURCE": str(token.get("type") or "none"),
+    }
+    if token.get("file"):
+        env["CTF_SERVICE_TOKEN_FILE"] = str(token["file"])
+    if token.get("env"):
+        env["CTF_SERVICE_TOKEN_ENV"] = str(token["env"])
+    pow_helper = metadata.get("pow_helper") if isinstance(metadata.get("pow_helper"), Mapping) else {}
+    if pow_helper.get("path"):
+        env["CTF_SERVICE_POW_HELPER"] = str(pow_helper["path"])
+    if root is not None:
+        env["CTF_OPERATOR_ROOT"] = _display(root)
+    return env
+
+
+def _process_output_bytes(value: Any) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    return str(value).encode("utf-8", errors="replace")
+
+
+def _service_attempt_command_display(metadata: Mapping[str, Any], *, script: str | Path | None, payload_file: str | Path | None) -> str:
+    endpoint = _service_endpoint_public(metadata)
+    parts = [
+        "ctfctl interactive service-attempt",
+        f"--challenge-id {shlex.quote(str(metadata.get('challenge_id') or '<challenge>'))}",
+        f"--endpoint {shlex.quote(str(endpoint.get('host') or ''))}:{endpoint.get('port')}",
+    ]
+    if script:
+        parts.append(f"--script {shlex.quote(str(script))}")
+    if payload_file:
+        parts.append(f"--payload-file {shlex.quote(str(payload_file))}")
+    return " ".join(parts)
+
+
+def _service_metric_payload(metadata: Mapping[str, Any], *, status: str, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    endpoint = _service_endpoint_public(metadata)
+    payload = {
+        "status": status,
+        "host": endpoint.get("host") or "",
+        "port": endpoint.get("port") or 0,
+        "transport": endpoint.get("transport") or "auto",
+        "locality": endpoint.get("locality") or "",
+        "token_source_type": (_service_public_token_source(metadata).get("type") or "none"),
+        "pow_helper_present": bool((metadata.get("pow_helper") or {}).get("path")) if isinstance(metadata.get("pow_helper"), Mapping) else False,
+    }
+    if extra:
+        payload.update(dict(extra))
+    return payload
+
+
+def _service_record_summary(record: Mapping[str, Any]) -> dict[str, Any]:
+    if not record:
+        return {}
+    prompts = record.get("prompts") if isinstance(record.get("prompts"), Mapping) else {}
+    return {
+        "path": record.get("_path") or "",
+        "status": record.get("status") or "",
+        "completed_at": record.get("completed_at") or "",
+        "transport": record.get("transport") or "",
+        "prompt_type": _service_prompt_summary(prompts),
+        "candidate_count": _int_value(record.get("candidate_count")) or 0,
+        "transcript_len": _int_value(record.get("transcript_len")) or 0,
+    }
+
+
+def _last_service_record(directory: Path) -> dict[str, Any]:
+    if not directory.exists():
+        return {}
+    paths = sorted(directory.glob("*.json"))
+    if not paths:
+        return {}
+    record = _read_json_file(paths[-1])
+    if record:
+        record["_path"] = _display(paths[-1])
+    return record
+
+
+def _service_text_preview(text: str, limit: int) -> str:
+    value = str(text or "")
+    return value[:limit] + (" [truncated]" if len(value) > limit else "")
+
+
+def _service_sanitize_text(text: str, *, secrets: Iterable[str] | None = None) -> str:
+    safe = str(text or "")
+    for secret in secrets or []:
+        value = str(secret or "")
+        if value:
+            safe = safe.replace(value, "[REDACTED_SERVICE_SECRET]")
+    safe = re.sub(r"(?im)^(\s*(?:authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)\s*:\s*).*$", r"\1[REDACTED]", safe)
+    safe = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", "Bearer [REDACTED]", safe)
+    safe = re.sub(r"(?i)\b(cookie|set-cookie)\s*=\s*[^;\s&]+", lambda match: f"{match.group(1)}=[REDACTED]", safe)
+    safe = re.sub(
+        r"(?i)\b(session(?:id)?[\w.-]*|csrf(?:token)?[\w.-]*|auth[\w.-]*|password[\w.-]*|passwd[\w.-]*|secret[\w.-]*|api[_-]?key[\w.-]*|jwt[\w.-]*)\s*[:=]\s*['\"]?[^'\"\s,}]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        safe,
+    )
+    return safe
+
+
 def _save_challenge_local_metadata(
     root: Path,
     board: dict[str, Any],
@@ -5613,6 +6833,7 @@ def _starter_context_data(
         "top_files": top_files,
         "primary_file": primary,
         "remote_endpoints": [str(value) for value in context.get("remote_endpoints") or []],
+        "service_metadata": _service_public_metadata(context.get("service_metadata") or {}) if context.get("service_metadata") else {},
         "available_tools": list(toolchain.get("available_tools") or []),
         "missing_critical_tools": list(toolchain.get("missing_critical_tools") or []),
         "recommended_fallbacks": list(toolchain.get("recommended_fallbacks") or []),
@@ -5645,6 +6866,9 @@ RAW_DIRS = [Path(item) for item in {_py_json(data["raw_dirs"])}]
 EXTRACTED_DIRS = [Path(item) for item in {_py_json(data["extracted_dirs"])}]
 TOP_FILES = [Path(item) for item in {_py_json(data["top_files"])}]
 REMOTE_ENDPOINTS = {_py_json(data["remote_endpoints"])}
+SERVICE_METADATA = {_py_json(data["service_metadata"])}
+SERVICE_ENDPOINT = SERVICE_METADATA.get("endpoint", {{}})
+SERVICE_TOKEN_SOURCE = SERVICE_METADATA.get("token_source", {{"type": "none"}})
 PRIMARY_FILE = Path({json.dumps(data["primary_file"])}) if {json.dumps(bool(data["primary_file"]))} else None
 AVAILABLE_TOOLS = {_py_json(data["available_tools"])}
 MISSING_CRITICAL_TOOLS = {_py_json(data["missing_critical_tools"])}
@@ -5675,6 +6899,9 @@ def read_text(path: Path, limit: int = 20000) -> str:
 
 
 def candidate_base_url() -> str:
+    if SERVICE_ENDPOINT.get("host") and SERVICE_ENDPOINT.get("port"):
+        scheme = "https" if SERVICE_ENDPOINT.get("transport") == "tls" else "http"
+        return f"{scheme}://{SERVICE_ENDPOINT['host']}:{SERVICE_ENDPOINT['port']}"
     for endpoint in REMOTE_ENDPOINTS:
         if endpoint.startswith(("http://", "https://")):
             return endpoint.rstrip("/")
@@ -5778,6 +7005,8 @@ def arg_value(name: str, default: str = "") -> str:
 
 
 def remote_host_port() -> tuple[str, int]:
+    if SERVICE_ENDPOINT.get("host") and SERVICE_ENDPOINT.get("port"):
+        return str(SERVICE_ENDPOINT["host"]), int(SERVICE_ENDPOINT["port"])
     for endpoint in REMOTE_ENDPOINTS:
         match = re.search(r"\\b(?:nc|ncat|netcat)\\s+(?:--ssl\\s+)?([A-Za-z0-9_.-]+)\\s+([0-9]{2,5})", endpoint)
         if not match:
@@ -6009,6 +7238,26 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
         lines.extend(f"- {_md(endpoint)}" for endpoint in context["remote_endpoints"])
     else:
         lines.append("- none detected")
+    service_metadata = context.get("service_metadata") if isinstance(context.get("service_metadata"), Mapping) else {}
+    service = _service_public_metadata(service_metadata) if service_metadata else {}
+    endpoint = service.get("endpoint") if isinstance(service.get("endpoint"), Mapping) else {}
+    lines.extend(["", "## Remote Service"])
+    if endpoint.get("host") and endpoint.get("port"):
+        lines.extend(
+            [
+                f"- host: {_md(str(endpoint.get('host') or ''))}",
+                f"- port: {int(endpoint.get('port') or 0)}",
+                f"- transport: {_md(str(endpoint.get('transport') or 'auto'))}",
+                f"- locality: {_md(str(endpoint.get('locality') or ''))}",
+                f"- token_source: {_md(str((service.get('token_source') or {}).get('type') or 'none'))}",
+                f"- pow_helper_present: {bool((service.get('pow_helper') or {}).get('path'))}",
+                f"- recommended_connect_command: `{_md(str(service.get('recommended_connect_command') or ''))}`",
+                f"- probe_command: `ctfctl interactive service-probe --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --json`",
+                f"- attempt_command: `ctfctl interactive service-attempt --contest-id {shlex.quote(contest_id)} --challenge-id {shlex.quote(str(item.get('challenge_id') or ''))} --json`",
+            ]
+        )
+    else:
+        lines.append("- none configured")
     lines.extend(["", "## Top Interesting Files"])
     if context["top_files"]:
         for entry in context["top_files"][:18]:
@@ -6095,6 +7344,22 @@ def _recommended_first_commands(item: Mapping[str, Any], context: Mapping[str, A
             commands.append(f"sed -n '1,220p' {shlex.quote(str(Path(context['brief_path']).expanduser()))}")
     if context.get("remote_endpoints"):
         commands.append("printf '%s\n' " + " ".join(shlex.quote(endpoint) for endpoint in context["remote_endpoints"][:4]))
+    if context.get("service_metadata"):
+        commands.append(
+            "ctfctl interactive service-status --contest-id "
+            + shlex.quote(str(context.get("contest_id") or "<contest>"))
+            + " --challenge-id "
+            + shlex.quote(str((context.get("service_metadata") or {}).get("challenge_id") or "<challenge>"))
+            + " --json"
+        )
+        commands.append(
+            "ctfctl interactive service-probe --contest-id "
+            + shlex.quote(str(context.get("contest_id") or "<contest>"))
+            + " --challenge-id "
+            + shlex.quote(str((context.get("service_metadata") or {}).get("challenge_id") or "<challenge>"))
+            + " --json"
+        )
+    if context.get("remote_endpoints"):
         commands.extend(_remote_probe_commands(context, report))
     commands.extend(_available_shell_commands(playbook["first_commands"], report))
     category = str(playbook.get("category") or "")
@@ -6629,7 +7894,7 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "total_events": len(contest_events),
         "sessions": len(sessions),
         "claimed_count": sum(1 for row in contest_events if row.get("event") == "claim"),
-        "attempt_count": sum(1 for row in contest_events if row.get("event") == "attempt_completed"),
+        "attempt_count": sum(1 for row in contest_events if row.get("event") in {"attempt_completed", "service_attempt_completed"}),
         "solved_count": solved_count,
         "stalled_count": sum(1 for row in contest_events if row.get("event") == "stalled"),
         "submitted_count": sum(1 for row in contest_events if row.get("event") == "submit") + artifact_attempted_count,
@@ -6713,7 +7978,7 @@ def _attempts_total(events: list[dict[str, Any]]) -> int | None:
     for row in events:
         event = str(row.get("event") or "")
         data = row.get("data") if isinstance(row.get("data"), Mapping) else {}
-        if event in {"attempt", "attempts", "attempt_completed"}:
+        if event in {"attempt", "attempts", "attempt_completed", "service_attempt_completed"}:
             total += 1
             seen = True
         value = data.get("attempts_total") or data.get("attempt_count")

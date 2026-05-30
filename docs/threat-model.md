@@ -18,6 +18,8 @@ Primary risks:
 - Accidental browser auth capture during setup.
 - Duplicate or low-confidence submissions consuming limited attempts.
 - Artifact upload challenges sending generated files to an unofficial endpoint or leaking uploaded artifacts, local paths, raw responses, or auth headers into public snapshots.
+- Remote service token leakage through service transcripts, command output, metrics, public snapshots, or target packs.
+- PoW helper output or remote transcripts accidentally carrying service auth material into public artifacts.
 - Concurrent workers racing into duplicate claims or duplicate submits.
 - Interactive same-machine Codex sessions duplicating claims unintentionally.
 - Background worker processes running after the operator believes a contest is paused.
@@ -60,6 +62,10 @@ Controls:
 - `ctfctl interactive upload-submit` computes artifact SHA-256 and size before upload, blocks when no endpoint/config exists, and allows live upload only to HTTP/HTTPS endpoints on the configured profile `base_url` origin with submission policy enabled.
 - Artifact upload records store artifact SHA-256, size, submit timestamp, response status, and active status. They do not store auth headers, cookies, browser storage, private keys, raw response bodies, or artifact contents.
 - Accepted/active artifact uploads may update `solved.jsonl`; blocked, rejected, planned, or inactive uploads do not enable writeup generation.
+- Remote service metadata is local operator state. `ctfctl interactive service-config` stores endpoint, transport, token source kind, token file path or environment variable name, and optional PoW helper path without reading or storing the token value.
+- `ctfctl interactive service-probe` and `service-attempt` write sanitized local-only transcripts under the challenge directory. Token values, cookies, sessions, auth headers, and private keys are redacted before display or record storage; local raw flags may remain visible for solving.
+- Service scripts receive endpoint and token-source metadata through environment variables, not the token value. Token injection happens only after a detected token prompt.
+- Public-safe service metrics include status, transport, prompt booleans, counts, lengths, and candidate hashes only. They must not include raw transcripts, token values, or raw candidate values.
 - Same-machine interactive claims use local claim locks by default. `--allow-duplicate` is explicit and should be used only for intentional local duplicate solving. Cross-machine duplicate claims are out of scope and must be handled manually if the team cares.
 - Interactive self memos are limited to sanitized `memory`, `evidence`, `attempts`, `next_steps`, and `operator_notes`.
 - Stalled interactive challenges keep compact local handoffs only. They do not get writeups.

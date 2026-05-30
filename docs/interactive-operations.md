@@ -90,6 +90,10 @@ ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id-or-
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --category web --json
 ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 120 --json
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --plain --token-source none --json
+ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 10 --json
+ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 60 --json
+ctfctl interactive service-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
@@ -126,6 +130,7 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 - category guess and confidence
 - challenge path, brief path, raw/handout directories, extracted directories, and manifest paths
 - remote connection info detected from board metadata or brief text
+- normalized remote service metadata with host, port, TLS/plain/auto transport, token-source metadata, optional PoW helper, and recommended probe/attempt commands
 - top interesting files from ingest manifests or local artifact fallback
 - available tools, missing critical tools, and recommended fallbacks
 - summaries and paths for `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`
@@ -138,6 +143,24 @@ Pack generation redacts auth-like material and excludes raw cookies, tokens, ses
 `interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with requests/urllib fallback, `exploit.py` with optional pwntools plus socket/subprocess fallback, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
 
 `interactive run-attempt` executes `--command` or `--script` from the challenge directory. It stores raw local stdout/stderr/returncode/runtime in `attempts/<timestamp>.json`, appends compact entries to `attempts.md` and `evidence.md`, records `attempt_started` and `attempt_completed` metrics, and extracts flag-like candidates into `candidates.jsonl`. `interactive candidates` lists the local candidate store with raw values for local solving. `interactive verify-candidate` reads a passed value, candidate file, or latest local candidate, then checks format, duplicate hash, fake-like markers, previous wrong submissions, and confidence before submit.
+
+Remote service commands:
+
+```bash
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --tls --token-source file --token-file <path> --pow-helper <path> --json
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --plain --token-source env --token-env <name> --json
+ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 10 --json
+ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --payload-file <path> --timeout 60 --json
+ctfctl interactive service-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+`service-config` records service endpoint metadata in operator and board metadata. It stores host, port, endpoint locality, transport (`tls`, `plain`, or `auto`), token source kind, token file path or environment variable name, and optional PoW helper path. It does not read or store token values. If the host differs from the platform profile origin, the command reports a warning and still allows the remote service because CTF service hosts often differ from board/API hosts.
+
+`service-probe` uses Python sockets for plain TCP and Python `ssl` as the TLS fallback for openssl-style services. It collects the banner/prompt, detects service token prompts, PoW prompts, and menu prompts, writes `service/probes/<timestamp>.json`, and records `service_probe_completed`, plus prompt-specific metrics when relevant. The transcript is local-only and sanitized for service secrets.
+
+`service-attempt` connects to the configured service, reads the initial prompt, injects a configured service token only when a token prompt is detected, runs the optional PoW helper with the prompt on stdin, then sends a payload file and/or script stdout. Scripts receive `CTF_SERVICE_HOST`, `CTF_SERVICE_PORT`, `CTF_SERVICE_TRANSPORT`, `CTF_SERVICE_ENDPOINT`, `CTF_SERVICE_TOKEN_SOURCE`, `CTF_SERVICE_TOKEN_FILE`, `CTF_SERVICE_TOKEN_ENV`, and `CTF_SERVICE_POW_HELPER` when configured; they do not receive the token value. Attempt records live under `service/attempts/<timestamp>.json`, candidates are appended to `candidates.jsonl`, and metrics record only hashes/counts/lengths/status. Public-safe snapshots exclude raw transcripts, token values, and raw candidate values.
+
+`solve-loop` uses `service-attempt` when service metadata is available for the target. If a generated or custom starter fails because a tool is missing, the service path still records `missing_tool_observed` and the usual fallback notes.
 
 `interactive brief` prints a compact status view for a target. Use it when the operator asks "지금 뭐 하고 있음?" so a Codex can answer from local state and keep moving.
 

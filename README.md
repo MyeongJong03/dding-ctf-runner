@@ -90,6 +90,10 @@ ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --
 ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
 ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script <path> --json
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id> --host <host> --port <port> --plain --token-source none --json
+ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script <path> --json
+ctfctl interactive service-status --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
@@ -115,11 +119,13 @@ ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 
 `interactive capabilities` writes `operator/toolchain/capabilities.json` and `.md` with category tool availability, missing high-priority tools, Docker/`ctf-pwn:latest` status, platform notes, and fallback suggestions. `interactive toolchain doctor` is the repo/contest-independent pre-contest check. These commands never install tools or run sudo; install commands are only operator-planned hints.
 
-`interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, toolchain capability summary, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
+`interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote service metadata, recommended connect/probe commands, toolchain capability summary, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 
 `interactive triage` reads only local challenge artifacts, briefs, manifests, and memos. It avoids requiring missing tools when a usable fallback exists, writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `interactive starter` creates fallback-aware `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, `solve_misc.py`, or `solve_ai_ml.py` and records the starter path in operator/board metadata. Neither command creates writeups.
 
 For manual experiments, use `run-attempt -> candidates -> verify-candidate`. Attempt JSON stores raw local stdout/stderr and raw candidates for solving. If an attempt fails because a tool is missing, `attempts.md` and `next_steps.md` record the blocker and fallback path, and metrics records `missing_tool_observed`. Public-safe metrics snapshots include only candidate hash, length, source, status, confidence, and timestamp.
+
+For nc/ncat/openssl-style services, use `service-config -> service-probe -> service-attempt`. `service-config` stores only host, port, transport, token source metadata, and optional PoW helper path; it never stores the service token value. `service-probe` uses plain sockets or Python TLS fallback, detects token/PoW/menu prompts, and stores a sanitized local-only transcript under `service/probes/`. `service-attempt` injects configured service tokens without printing them, runs a configured PoW helper when needed, stores sanitized local-only transcripts under `service/attempts/`, extracts local candidates, and records `service_*` metrics without raw transcript, token, or candidate values in public-safe snapshots.
 
 When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, static slug, artifact source, or alias:
 

@@ -232,6 +232,18 @@ ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <i
 
 `run-attempt` executes from the challenge directory and stores raw local stdout/stderr/returncode/runtime in `attempts/`. It appends compact attempt/evidence notes and records `attempt_started`/`attempt_completed` metrics. Raw candidates are allowed in local terminal output and `candidates.jsonl`; public-safe snapshots use only hash, length, source, status, confidence, and timestamp.
 
+Remote service workflow:
+
+```bash
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --tls --token-source file --token-file <path> --json
+ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --host <host> --port <port> --plain --token-source env --token-env <name> --json
+ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --timeout 10 --json
+ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --script <path> --timeout 60 --json
+ctfctl interactive service-status --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+```
+
+`service-config` records endpoint metadata from explicit host/port input or challenge text such as nc/ncat/openssl connection hints. Use `--tls` or `--plain` when the transport is known; otherwise probe can auto-fallback between Python TLS and plain sockets. Token sources are `none`, `profile`, `file`, or `env`; only the source kind, file path, or environment variable name is stored. `service-probe` captures banner/prompt evidence and detects service token, PoW, and menu prompts without printing token values. `service-attempt` connects to the configured service, injects a configured service token only after a token prompt, runs the optional PoW helper with the prompt on stdin, sends a payload file or script stdout, stores sanitized local-only transcripts, and extracts local candidates. Public-safe snapshots exclude raw transcripts, tokens, and raw candidate values.
+
 Compact current-target status:
 
 ```bash

@@ -82,6 +82,10 @@ from .interactive import (
     prepare_target as interactive_prepare_target,
     release_claim as interactive_release_claim,
     run_attempt as interactive_run_attempt,
+    service_attempt as interactive_service_attempt,
+    service_config as interactive_service_config,
+    service_probe as interactive_service_probe,
+    service_status as interactive_service_status,
     solve_loop as interactive_solve_loop,
     solver_prompt as interactive_solver_prompt,
     starter_challenge as interactive_starter_challenge,
@@ -473,6 +477,47 @@ def _cmd_interactive_run_attempt(args: argparse.Namespace) -> int:
     )
     _print_local_json(data)
     return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_service_config(args: argparse.Namespace) -> int:
+    data = interactive_service_config(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        host=args.host,
+        port=args.port,
+        tls=args.tls,
+        plain=args.plain,
+        token_source=args.token_source,
+        token_file=args.token_file,
+        token_env=args.token_env,
+        pow_helper=args.pow_helper,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_service_probe(args: argparse.Namespace) -> int:
+    data = interactive_service_probe(args.contest_id, challenge_id=args.challenge_id, timeout=args.timeout)
+    _print_local_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_service_attempt(args: argparse.Namespace) -> int:
+    data = interactive_service_attempt(
+        args.contest_id,
+        challenge_id=args.challenge_id,
+        script=args.script,
+        payload_file=args.payload_file,
+        timeout=args.timeout,
+    )
+    _print_local_json(data)
+    return 0 if data.get("status") not in {"blocked", "error"} else 1
+
+
+def _cmd_interactive_service_status(args: argparse.Namespace) -> int:
+    data = interactive_service_status(args.contest_id, challenge_id=args.challenge_id)
+    _print_local_json(data)
+    return 0 if data.get("status") in {"ok", "unconfigured"} else 1
 
 
 def _cmd_interactive_candidates(args: argparse.Namespace) -> int:
@@ -2328,6 +2373,38 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_run_attempt.add_argument("--timeout", type=int, default=120)
     interactive_run_attempt.add_argument("--json", action="store_true")
     interactive_run_attempt.set_defaults(func=_cmd_interactive_run_attempt)
+    interactive_service_config = interactive_sub.add_parser("service-config")
+    interactive_service_config.add_argument("--contest-id", required=True)
+    interactive_service_config.add_argument("--challenge-id", required=True)
+    interactive_service_config.add_argument("--host")
+    interactive_service_config.add_argument("--port", type=int)
+    interactive_service_config.add_argument("--tls", action="store_true")
+    interactive_service_config.add_argument("--plain", action="store_true")
+    interactive_service_config.add_argument("--token-source", choices=["none", "profile", "file", "env"])
+    interactive_service_config.add_argument("--token-file")
+    interactive_service_config.add_argument("--token-env")
+    interactive_service_config.add_argument("--pow-helper")
+    interactive_service_config.add_argument("--json", action="store_true")
+    interactive_service_config.set_defaults(func=_cmd_interactive_service_config)
+    interactive_service_probe = interactive_sub.add_parser("service-probe")
+    interactive_service_probe.add_argument("--contest-id", required=True)
+    interactive_service_probe.add_argument("--challenge-id", required=True)
+    interactive_service_probe.add_argument("--timeout", type=int, default=10)
+    interactive_service_probe.add_argument("--json", action="store_true")
+    interactive_service_probe.set_defaults(func=_cmd_interactive_service_probe)
+    interactive_service_attempt = interactive_sub.add_parser("service-attempt")
+    interactive_service_attempt.add_argument("--contest-id", required=True)
+    interactive_service_attempt.add_argument("--challenge-id", required=True)
+    interactive_service_attempt.add_argument("--script")
+    interactive_service_attempt.add_argument("--payload-file")
+    interactive_service_attempt.add_argument("--timeout", type=int, default=60)
+    interactive_service_attempt.add_argument("--json", action="store_true")
+    interactive_service_attempt.set_defaults(func=_cmd_interactive_service_attempt)
+    interactive_service_status = interactive_sub.add_parser("service-status")
+    interactive_service_status.add_argument("--contest-id", required=True)
+    interactive_service_status.add_argument("--challenge-id", required=True)
+    interactive_service_status.add_argument("--json", action="store_true")
+    interactive_service_status.set_defaults(func=_cmd_interactive_service_status)
     interactive_candidates = interactive_sub.add_parser("candidates")
     interactive_candidates.add_argument("--contest-id", required=True)
     interactive_candidates.add_argument("--challenge-id", required=True)
