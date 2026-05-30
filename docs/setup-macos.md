@@ -19,6 +19,7 @@ cd ~
 git clone <repo-url> dding-ctf-runner
 cd ~/dding-ctf-runner
 python3 -m pip install -e . pytest
+./scripts/ctfctl interactive toolchain doctor --json
 ```
 
 Browser tooling is optional:
@@ -38,6 +39,7 @@ export CONTEST_ID=<contest>
 export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 4 --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
@@ -53,6 +55,29 @@ codex
 Paste a different generated prompt into each terminal. Each terminal claims,
 solves, submits through `ctfctl`, writes accepted-only ko/en writeups, cleans up,
 and claims the next challenge.
+
+## Toolchain Doctor
+
+Run the doctor before a contest:
+
+```bash
+./scripts/ctfctl interactive toolchain doctor --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category rev --refresh --json
+./scripts/ctfctl interactive fallback --tool ncat --json
+./scripts/ctfctl interactive fallback --tool cpio --json
+```
+
+Recommended macOS tools include `python3`, `pip`, `uv`, `git`, `curl`, `wget`,
+`nc`/`ncat`, `openssl`, `socat`, `file`, `strings`, `lldb`, `qemu`, `cpio`,
+`tshark`, `zsteg`, `steghide`, `foremost`, `yara`, `volatility3`, `sage`,
+`z3`, `ROPgadget`, `one_gadget`, `patchelf`, and `pwninit`. Homebrew, pipx,
+gem, or release-binary commands in the report are hints only; the runner never
+runs sudo or installs packages automatically.
+
+macOS uses BSD userland by default, so GNU ELF workflows may need Homebrew
+binutils or the Docker `ctf-pwn:latest` fallback. For TLS remotes without
+`ncat --ssl`, use `openssl s_client`; for initramfs/cpio work without `cpio`,
+try `bsdtar`, a Python parser, or Docker.
 
 ## Docker On Apple Silicon
 

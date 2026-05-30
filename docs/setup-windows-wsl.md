@@ -16,6 +16,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e . pytest
 ./scripts/ctfctl preflight --deep --json
+./scripts/ctfctl interactive toolchain doctor --json
 ```
 
 Install browser support only when platform discovery or storage capture needs it:
@@ -39,6 +40,7 @@ export CONTEST_ID=<contest>
 export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents 6 --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
@@ -58,6 +60,31 @@ writeup, cleanup, and next claim.
 Same-machine duplicate claims are blocked by default. Use
 `ctfctl interactive claim --allow-duplicate` only when intentionally assigning
 the same challenge to multiple local Codex sessions.
+
+## Toolchain Doctor
+
+Run the doctor before the contest and after changing shells or Docker Desktop
+integration:
+
+```bash
+./scripts/ctfctl interactive toolchain doctor --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category pwn --refresh --json
+./scripts/ctfctl interactive fallback --tool ncat --json
+./scripts/ctfctl interactive fallback --tool cpio --json
+```
+
+Recommended WSL tools include `python3`, `pip`, `uv`, `git`, `curl`, `wget`,
+`nc`/`ncat`, `openssl`, `socat`, `file`, `strings`, `readelf`, `objdump`,
+`checksec`, `gdb`, `qemu-system-x86_64`, `cpio`, `tshark`, `zsteg`,
+`steghide`, `foremost`, `yara`, `volatility3`, `sage`, `z3`, `ROPgadget`,
+`one_gadget`, `patchelf`, and `pwninit`. Install missing tools only as an
+operator-planned action; the runner never runs sudo or installs packages.
+
+For TLS remotes, use the reported `ncat` fallback `openssl s_client` when
+`ncat --ssl` is missing. For kernel/initramfs archives, use `bsdtar`, a Python
+newc parser, or Docker `ctf-pwn:latest` when `cpio` is missing. Keep these
+tools inside WSL; Windows-native binaries may not be visible to Codex or
+subprocesses running in WSL.
 
 ## Platform Auth Profiles
 

@@ -47,8 +47,10 @@ export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
 export AGENTS=4
 
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive toolchain doctor --json
 ./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
@@ -91,6 +93,8 @@ ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --
 ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
+ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category pwn --refresh --json
+ctfctl interactive fallback --tool ncat --json
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind memory --append "short fact" --json
 ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
 ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
@@ -109,11 +113,13 @@ ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
 
 `interactive next` ranks canonical claimable targets by useful signal instead of board order: attachments, remote endpoints, category confidence, existing progress, and clear `next_steps` raise priority; alias/static rows, generic no-file statements, locally solved, platform-solved, external-solved, and stalled-documented challenges are skipped. It claims the selected challenge unless `--dry-run` is used and returns `target_pack_path`.
 
-`interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
+`interactive capabilities` writes `operator/toolchain/capabilities.json` and `.md` with category tool availability, missing high-priority tools, Docker/`ctf-pwn:latest` status, platform notes, and fallback suggestions. `interactive toolchain doctor` is the repo/contest-independent pre-contest check. These commands never install tools or run sudo; install commands are only operator-planned hints.
 
-`interactive triage` reads only local challenge artifacts, briefs, manifests, and memos. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `interactive starter` creates `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, `solve_misc.py`, or `solve_ai_ml.py` and records the starter path in operator/board metadata. Neither command creates writeups.
+`interactive target-pack` writes `operator/target-packs/<challenge>.md` with canonical/alias/artifact-source identity, actual challenge and brief paths, raw/extracted files, remote connection info, toolchain capability summary, existing memory/evidence/attempts/next_steps/operator_notes summaries, recommended first commands, category playbooks, stall criteria, and cleanup reminders. `interactive brief` is the short status view to answer "what are you working on?" without stopping the solver loop.
 
-For manual experiments, use `run-attempt -> candidates -> verify-candidate`. Attempt JSON stores raw local stdout/stderr and raw candidates for solving. Public-safe metrics snapshots include only candidate hash, length, source, status, confidence, and timestamp.
+`interactive triage` reads only local challenge artifacts, briefs, manifests, and memos. It avoids requiring missing tools when a usable fallback exists, writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. `interactive starter` creates fallback-aware `solve_web.py`, `exploit.py`, `solve_rev.py`, `solve_crypto.py`, `solve_misc.py`, or `solve_ai_ml.py` and records the starter path in operator/board metadata. Neither command creates writeups.
+
+For manual experiments, use `run-attempt -> candidates -> verify-candidate`. Attempt JSON stores raw local stdout/stderr and raw candidates for solving. If an attempt fails because a tool is missing, `attempts.md` and `next_steps.md` record the blocker and fallback path, and metrics records `missing_tool_observed`. Public-safe metrics snapshots include only candidate hash, length, source, status, confidence, and timestamp.
 
 When a teammate solves a challenge outside this machine and the platform does not expose team-solved state, record any canonical name, challenge ID, static slug, artifact source, or alias:
 

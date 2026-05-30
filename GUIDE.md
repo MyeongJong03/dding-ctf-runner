@@ -29,6 +29,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -e . pytest
 ./scripts/ctfctl preflight --deep --json
+./scripts/ctfctl interactive toolchain doctor --json
 ```
 
 Keep the repo on WSL ext4, not `/mnt/c`. Enable Docker Desktop WSL integration for pwn/rev work.
@@ -49,6 +50,7 @@ export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspac
 ./scripts/ctfctl docker benchmark --image ctf-pwn:latest --json
 ./scripts/ctfctl docker pool-smoke --contest-id mac-docker-smoke --workers 2 --json
 ./scripts/ctfctl docker pool-stop --contest-id mac-docker-smoke --json
+./scripts/ctfctl interactive toolchain doctor --json
 ```
 
 ## 3. Profile And Auth
@@ -433,6 +435,19 @@ Submit blocked:
 - Check profile `policy.allow_submission`.
 - Confirm `--confirm` was used.
 - Inspect the submit JSON for duplicate, cooldown, wrong-limit, confidence, or fake-like guard reasons.
+
+Tool missing:
+
+```bash
+ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category pwn --refresh --json
+ctfctl interactive fallback --tool ncat --json
+ctfctl interactive fallback --tool cpio --json
+```
+
+- The runner records capability reports under `operator/toolchain/`.
+- Target packs, triage, starters, and solve-loop prefer available tools and documented fallbacks.
+- Do not run sudo or auto-install during a live solve loop; install hints are planned operator actions.
+- If a missing tool blocks an attempt, `attempts.md`, `next_steps.md`, and metrics record the blocker so the solver can use a fallback or switch targets.
 
 Docker on Windows WSL:
 

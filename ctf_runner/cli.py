@@ -58,10 +58,12 @@ from .handoff import read_handoffs
 from .ingest import brief_for_challenge, ingest_challenge, ingest_text_challenge, ingest_text_file, manifest_path, scan_path
 from .interactive import (
     board_status as interactive_board_status,
+    capabilities_report as interactive_capabilities_report,
     challenge_brief as interactive_challenge_brief,
     claim_challenge as interactive_claim_challenge,
     cleanup_challenge as interactive_cleanup_challenge,
     e2e_smoke as interactive_e2e_smoke,
+    fallback_report as interactive_fallback_report,
     init_operator as interactive_init_operator,
     list_candidates as interactive_list_candidates,
     mark_external_solved as interactive_mark_external_solved,
@@ -87,6 +89,7 @@ from .interactive import (
     submit_flag_file as interactive_submit_flag_file,
     sync_operator as interactive_sync_operator,
     target_pack as interactive_target_pack,
+    toolchain_doctor_report as interactive_toolchain_doctor_report,
     triage_challenge as interactive_triage_challenge,
     upload_submit as interactive_upload_submit,
     verify_candidate as interactive_verify_candidate,
@@ -350,6 +353,37 @@ def _cmd_interactive_status(args: argparse.Namespace) -> int:
     data = interactive_operator_status(args.contest_id)
     _print_json(data)
     return 0
+
+
+def _cmd_interactive_capabilities(args: argparse.Namespace) -> int:
+    data = interactive_capabilities_report(
+        args.contest_id,
+        category=args.category,
+        refresh=args.refresh,
+    )
+    if args.json:
+        _print_json(data)
+    elif data.get("capabilities_md_path"):
+        path = Path(str(data.get("capabilities_md_path") or "").replace("~", str(Path.home()), 1))
+        print(redact_text(path.read_text(encoding="utf-8", errors="replace")))
+    else:
+        _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_toolchain_doctor(args: argparse.Namespace) -> int:
+    data = interactive_toolchain_doctor_report(category=args.category)
+    _print_json(data)
+    return 0 if data.get("status") == "ok" else 1
+
+
+def _cmd_interactive_fallback(args: argparse.Namespace) -> int:
+    data = interactive_fallback_report(tool=args.tool)
+    if args.json:
+        _print_json(data)
+    else:
+        _print_json(data)
+    return 0 if data.get("status") in {"ok", "unknown_tool"} else 1
 
 
 def _cmd_interactive_claim(args: argparse.Namespace) -> int:
@@ -2223,6 +2257,22 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_status.add_argument("--contest-id", required=True)
     interactive_status.add_argument("--json", action="store_true")
     interactive_status.set_defaults(func=_cmd_interactive_status)
+    interactive_capabilities = interactive_sub.add_parser("capabilities")
+    interactive_capabilities.add_argument("--contest-id")
+    interactive_capabilities.add_argument("--category")
+    interactive_capabilities.add_argument("--refresh", action="store_true")
+    interactive_capabilities.add_argument("--json", action="store_true")
+    interactive_capabilities.set_defaults(func=_cmd_interactive_capabilities)
+    interactive_toolchain = interactive_sub.add_parser("toolchain")
+    interactive_toolchain_sub = interactive_toolchain.add_subparsers(dest="interactive_toolchain_command", required=True)
+    interactive_toolchain_doctor = interactive_toolchain_sub.add_parser("doctor")
+    interactive_toolchain_doctor.add_argument("--category")
+    interactive_toolchain_doctor.add_argument("--json", action="store_true")
+    interactive_toolchain_doctor.set_defaults(func=_cmd_interactive_toolchain_doctor)
+    interactive_fallback = interactive_sub.add_parser("fallback")
+    interactive_fallback.add_argument("--tool", required=True)
+    interactive_fallback.add_argument("--json", action="store_true")
+    interactive_fallback.set_defaults(func=_cmd_interactive_fallback)
     interactive_claim = interactive_sub.add_parser("claim")
     interactive_claim.add_argument("--contest-id", required=True)
     interactive_claim.add_argument("--agent", required=True)

@@ -27,6 +27,16 @@ from .platform_ctfd import load_platform_adapter
 from .redact import redact_text
 from .state import utc_now
 from .submit import classify_flag_confidence, detect_flag_candidates, hash_flag, load_submit_policy, should_submit
+from .toolchain import (
+    choose_command_or_fallback,
+    collect_toolchain_capabilities,
+    command_available,
+    detect_missing_tool_failure,
+    fallback_suggestions,
+    render_capabilities_markdown,
+    summarize_capabilities_for_category,
+    toolchain_doctor,
+)
 
 
 MEMO_KINDS = ("memory", "evidence", "attempts", "next_steps", "operator_notes")
@@ -79,6 +89,43 @@ def init_operator(
         "preserved": paths["preserved"],
         "paths": {key: _display(path) for key, path in paths["paths"].items()},
     }
+
+
+def capabilities_report(
+    contest_id: str | None = None,
+    *,
+    category: str | None = None,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    report = collect_toolchain_capabilities(category=category, probe_docker=True)
+    report["refresh"] = bool(refresh)
+    if not contest_id:
+        return report
+    init_operator(contest_id)
+    root = operator_root(contest_id)
+    saved = _save_toolchain_report(root, report)
+    report.update(
+        {
+            "contest_id": contest_id,
+            "capabilities_json_path": _display(saved["json"]),
+            "capabilities_md_path": _display(saved["md"]),
+        }
+    )
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="toolchain_checked",
+        data=_toolchain_metric_payload(report),
+    )
+    return report
+
+
+def toolchain_doctor_report(*, category: str | None = None) -> dict[str, Any]:
+    return toolchain_doctor(category=category)
+
+
+def fallback_report(*, tool: str) -> dict[str, Any]:
+    return fallback_suggestions(tool)
 
 
 def sync_operator(
@@ -493,6 +540,7 @@ def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None)
         return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
 
     context = _target_context(contest_id, root, item)
+    _attach_toolchain_context(root, contest_id, context)
     pack_path = root / "target-packs" / f"{_safe_slug(str(item.get('canonical_id') or item.get('challenge_id') or challenge_id))}.md"
     text = _render_target_pack(contest_id, item, context, agent=agent)
     pack_path.parent.mkdir(parents=True, exist_ok=True)
@@ -509,6 +557,7 @@ def target_pack(contest_id: str, *, challenge_id: str, agent: str | None = None)
         "brief_path": _display(context["brief_path"]) if context.get("brief_path") else "",
         "challenge_path": _display(context["challenge_dir"]),
         "remote_endpoint_count": len(context["remote_endpoints"]),
+        "toolchain": context.get("toolchain_summary") or {},
     }
 
 
@@ -521,6 +570,7 @@ def challenge_brief(contest_id: str, *, challenge_id: str) -> dict[str, Any]:
     if item is None:
         return {"status": "not_found", "contest_id": contest_id, "challenge_id": challenge_id}
     context = _target_context(contest_id, root, item)
+    _attach_toolchain_context(root, contest_id, context)
     text = _render_compact_brief(contest_id, item, context)
     return {
         "status": "ok",
@@ -552,6 +602,7 @@ def triage_challenge(
     pack = target_pack(contest_id, challenge_id=challenge_key, agent=agent)
     context = _target_context(contest_id, root, item)
     effective_category = _effective_triage_category(category, context)
+    _attach_toolchain_context(root, contest_id, context, category=effective_category)
     started = _record_metrics_event(
         root,
         contest_id=contest_id,
@@ -563,6 +614,15 @@ def triage_challenge(
 
     files = _triage_file_inventory(context)
     command_rows = _run_category_triage_commands(effective_category, context, files)
+    for fallback in _selected_fallback_rows(command_rows):
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="fallback_selected",
+            agent=agent,
+            challenge_id=challenge_key,
+            data=fallback,
+        )
     findings = _category_triage_findings(effective_category, item, context, files, command_rows)
     next_steps = _triage_next_steps(effective_category, findings, context)
 
@@ -631,6 +691,7 @@ def triage_challenge(
             "category": effective_category,
             "finding_count": len(findings),
             "command_count": len(command_rows),
+            "fallback_count": len(_selected_fallback_rows(command_rows)),
             "summary_path": _display(summary_path),
         },
     )
@@ -646,8 +707,10 @@ def triage_challenge(
         "commands_path": _display(commands_path),
         "findings_path": _display(findings_path),
         "top_files": [_display(_triage_file_path(row)) for row in files[:8]],
-        "first_commands": [str(row.get("command") or "") for row in command_rows[:8]],
+        "first_commands": [str(row.get("command") or "") for row in command_rows if row.get("status") != "skipped"][:8],
+        "skipped_tools": _skipped_tool_rows(command_rows),
         "next_steps": next_steps,
+        "toolchain": context.get("toolchain_summary") or {},
         "metrics": {"started_at": started.get("timestamp"), "completed_at": completed.get("timestamp")},
     }
 
@@ -669,6 +732,7 @@ def starter_challenge(
     context = _target_context(contest_id, root, item)
     challenge_key = str(item.get("challenge_id") or challenge_id)
     effective_category = _effective_triage_category(category, context)
+    _attach_toolchain_context(root, contest_id, context, category=effective_category)
     starter_path = Path(context["challenge_dir"]) / _starter_filename(effective_category)
     starter_path.parent.mkdir(parents=True, exist_ok=True)
     created = False
@@ -681,6 +745,7 @@ def starter_challenge(
         "category": effective_category,
         "starter_path": _display(starter_path),
         "status": "created" if created else "preserved",
+        "toolchain": context.get("toolchain_summary") or {},
         "updated_at": utc_now(),
     }
     _save_challenge_solver_metadata(root, board, challenge_key, metadata)
@@ -690,7 +755,12 @@ def starter_challenge(
         contest_id=contest_id,
         event="starter_created",
         challenge_id=challenge_key,
-        data={"category": effective_category, "starter_path": _display(starter_path), "status": metadata["status"]},
+        data={
+            "category": effective_category,
+            "starter_path": _display(starter_path),
+            "status": metadata["status"],
+            "missing_critical_tools": list((context.get("toolchain_summary") or {}).get("missing_critical_tools") or [])[:20],
+        },
     )
     return {
         "status": "ok",
@@ -700,6 +770,7 @@ def starter_challenge(
         "starter_path": _display(starter_path),
         "created": created,
         "metadata": metadata,
+        "toolchain": context.get("toolchain_summary") or {},
     }
 
 
@@ -857,6 +928,7 @@ def run_attempt(
         error = "execution_error"
     runtime_sec = round(time.perf_counter() - start, 3)
     completed_at = utc_now()
+    missing_tool = detect_missing_tool_failure(stdout, stderr) if returncode not in (0, None) or error else None
 
     policy = load_submit_policy()
     detected = _detect_attempt_candidates(
@@ -889,6 +961,7 @@ def run_attempt(
         "stdout_len": len(stdout),
         "stderr_len": len(stderr),
         "error": error,
+        "missing_tool": missing_tool or {},
         "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
         "candidate_count": len(detected),
         "stored_candidate_count": len(stored_candidates),
@@ -896,6 +969,16 @@ def run_attempt(
     _write_json_raw(attempt_path, attempt_record)
     _append_attempt_markdown(challenge_dir, attempt_record, attempt_path, detected)
     _append_attempt_evidence(challenge_dir, attempt_record, attempt_path, detected)
+    if missing_tool:
+        _append_missing_tool_notes(challenge_dir, missing_tool, attempt_path)
+        _record_metrics_event(
+            root,
+            contest_id=contest_id,
+            event="missing_tool_observed",
+            agent=agent,
+            challenge_id=challenge_key,
+            data=_missing_tool_metric_payload(missing_tool),
+        )
 
     completed_event = _record_metrics_event(
         root,
@@ -913,10 +996,11 @@ def run_attempt(
             "candidate_count": len(detected),
             "candidate_hashes": [str(row.get("flag_hash") or "") for row in detected],
             "attempt_path": _display(attempt_path),
+            "missing_tool": str((missing_tool or {}).get("tool") or ""),
         },
     )
     return {
-        "status": "ok" if not timed_out and returncode == 0 else ("timeout" if timed_out else "completed_nonzero"),
+        "status": "ok" if not timed_out and returncode == 0 else ("timeout" if timed_out else ("missing_tool" if missing_tool else "completed_nonzero")),
         "contest_id": contest_id,
         "challenge_id": challenge_key,
         "agent": agent or "",
@@ -928,6 +1012,7 @@ def run_attempt(
         "timed_out": timed_out,
         "stdout": stdout,
         "stderr": stderr,
+        "missing_tool": missing_tool or {},
         "candidates": [_candidate_local_payload(row) for row in detected],
         "stored_candidates": [_candidate_local_payload(row) for row in stored_candidates],
         "metrics": {"started_at": started_at, "completed_at": completed_event.get("timestamp")},
@@ -1105,6 +1190,26 @@ def solve_loop(
             timeout=120,
         )
         attempts.append(attempt)
+        if attempt.get("status") == "missing_tool":
+            tool = str((attempt.get("missing_tool") or {}).get("tool") or "unknown")
+            reason = f"solve-loop blocked by missing tool {tool}; fallback recorded in attempts and next_steps"
+            stalled = mark_stalled(contest_id, agent=agent, challenge=challenge_key, reason=reason)
+            summary = metrics_summary(contest_id)
+            return {
+                "status": "stalled",
+                "contest_id": contest_id,
+                "agent": agent,
+                "challenge_id": challenge_key,
+                "reason": "missing_tool",
+                "missing_tool": attempt.get("missing_tool") or {},
+                "prepare_target": prepared,
+                "attempts": attempts,
+                "verifications": verifications,
+                "submit_results": submit_results,
+                "stalled": stalled,
+                "metrics_summary": summary,
+                "next_action": "Continue with ctfctl interactive solve-loop --contest-id <contest> --agent <agent> --json for the next challenge.",
+            }
         for candidate_row in attempt.get("candidates") or []:
             value = str(candidate_row.get("value") or "")
             if not value:
@@ -2112,7 +2217,7 @@ def _ensure_operator_files(
     created: list[str] = []
     preserved: list[str] = []
     paths: dict[str, Path] = {}
-    for dirname in ("claims", "memos", "writeups"):
+    for dirname in ("claims", "memos", "writeups", "toolchain"):
         path = root / dirname
         existed = path.exists()
         path.mkdir(parents=True, exist_ok=True)
@@ -2213,6 +2318,51 @@ def _operator_config(root: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _save_toolchain_report(root: Path, report: Mapping[str, Any]) -> dict[str, Path]:
+    toolchain_dir = root / "toolchain"
+    toolchain_dir.mkdir(parents=True, exist_ok=True)
+    json_path = toolchain_dir / "capabilities.json"
+    md_path = toolchain_dir / "capabilities.md"
+    _write_json(json_path, _redact_object(dict(report)))
+    md_path.write_text(_target_safe_text(render_capabilities_markdown(report)), encoding="utf-8")
+    return {"json": json_path, "md": md_path}
+
+
+def _load_toolchain_report(root: Path) -> dict[str, Any] | None:
+    path = root / "toolchain" / "capabilities.json"
+    if not path.exists():
+        return None
+    data = _read_json_file(path)
+    return data if data else None
+
+
+def _toolchain_report_for_context(root: Path, contest_id: str, category: str | None) -> dict[str, Any]:
+    existing = _load_toolchain_report(root)
+    if existing:
+        return existing
+    report = collect_toolchain_capabilities(category=category, probe_docker=False)
+    _save_toolchain_report(root, report)
+    _record_metrics_event(
+        root,
+        contest_id=contest_id,
+        event="toolchain_checked",
+        data=_toolchain_metric_payload(report),
+    )
+    return report
+
+
+def _toolchain_metric_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "category": str(report.get("category") or ""),
+        "categories": list(report.get("categories") or [])[:12],
+        "available_tool_count": len(report.get("available_tools") or []),
+        "missing_high_priority_tools": list(report.get("missing_high_priority_tools") or [])[:40],
+        "recommended_fallback_count": len(report.get("recommended_fallbacks") or []),
+        "docker_available": bool((report.get("docker") or {}).get("available")) if isinstance(report.get("docker"), Mapping) else False,
+        "no_auto_install": True,
+    }
 
 
 def _challenge_submit_metadata(root: Path, board: Mapping[str, Any], challenge_id: str) -> dict[str, Any]:
@@ -3997,6 +4147,14 @@ def _target_context(contest_id: str, root: Path, item: Mapping[str, Any]) -> dic
     }
 
 
+def _attach_toolchain_context(root: Path, contest_id: str, context: dict[str, Any], *, category: str | None = None) -> None:
+    effective = category or str((context.get("category_guess") or {}).get("category") or "")
+    report = _toolchain_report_for_context(root, contest_id, effective)
+    summary = summarize_capabilities_for_category(report, effective)
+    context["toolchain_report"] = report
+    context["toolchain_summary"] = summary
+
+
 def _challenge_workdir(contest_id: str, item: Mapping[str, Any]) -> Path:
     raw_path = str(item.get("path") or "").strip()
     if raw_path:
@@ -4435,15 +4593,15 @@ def _run_category_triage_commands(category: str, context: Mapping[str, Any], fil
     cwd = Path(context["challenge_dir"]).expanduser()
     primary = _primary_triage_files(category, files)
     rows: list[dict[str, Any]] = []
-    rows.append(_run_triage_command(["find", ".", "-maxdepth", "4", "-type", "f"], cwd=cwd, timeout=5))
+    rows.append(_run_triage_command_planned(["find", ".", "-maxdepth", "4", "-type", "f"], context=context, cwd=cwd, timeout=5))
     if primary:
-        rows.append(_run_triage_command(["file", *[str(path) for path in primary[:12]]], cwd=cwd, timeout=8))
+        rows.append(_run_triage_command_planned(["file", *[str(path) for path in primary[:12]]], context=context, cwd=cwd, timeout=8))
 
     if category == "web":
         rows.extend(
             [
-                _run_triage_command(["rg", "-n", r"route|app\.|router\.|urlpatterns|FastAPI|express|fetch|axios|XMLHttpRequest|<form", "."], cwd=cwd, timeout=8),
-                _run_triage_command(["rg", "-n", r"auth|login|session|jwt|cookie|upload|render|template|sql|sqlite|eval|exec|ssrf|open\(|path", "."], cwd=cwd, timeout=8),
+                _run_triage_command_planned(["rg", "-n", r"route|app\.|router\.|urlpatterns|FastAPI|express|fetch|axios|XMLHttpRequest|<form", "."], context=context, cwd=cwd, timeout=8),
+                _run_triage_command_planned(["rg", "-n", r"auth|login|session|jwt|cookie|upload|render|template|sql|sqlite|eval|exec|ssrf|open\(|path", "."], context=context, cwd=cwd, timeout=8),
             ]
         )
     elif category == "pwn":
@@ -4451,10 +4609,10 @@ def _run_category_triage_commands(category: str, context: Mapping[str, Any], fil
         if target:
             rows.extend(
                 [
-                    _run_triage_command(["checksec", f"--file={target}"], cwd=cwd, timeout=8),
-                    _run_triage_command(["readelf", "-h", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["readelf", "-s", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["strings", "-a", "-n", "4", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["checksec", f"--file={target}"], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["readelf", "-h", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["readelf", "-s", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["strings", "-a", "-n", "4", str(target)], context=context, cwd=cwd, timeout=8),
                 ]
             )
     elif category == "rev":
@@ -4462,32 +4620,32 @@ def _run_category_triage_commands(category: str, context: Mapping[str, Any], fil
         if target:
             rows.extend(
                 [
-                    _run_triage_command(["readelf", "-h", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["objdump", "-f", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["strings", "-a", "-n", "4", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["readelf", "-h", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["objdump", "-f", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["strings", "-a", "-n", "4", str(target)], context=context, cwd=cwd, timeout=8),
                 ]
             )
-        rows.append(_run_triage_command(["rg", "-n", r"check|verify|flag|key|decrypt|xor|base64|password|serial", "."], cwd=cwd, timeout=8))
+        rows.append(_run_triage_command_planned(["rg", "-n", r"check|verify|flag|key|decrypt|xor|base64|password|serial", "."], context=context, cwd=cwd, timeout=8))
     elif category == "crypto":
-        rows.append(_run_triage_command(["rg", "-n", r"RSA|ECC|ECDSA|AES|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce|curve|sage|Crypto", "."], cwd=cwd, timeout=8))
+        rows.append(_run_triage_command_planned(["rg", "-n", r"RSA|ECC|ECDSA|AES|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce|curve|sage|Crypto", "."], context=context, cwd=cwd, timeout=8))
     elif category == "forensics/misc":
         target = primary[0] if primary else None
         if target:
             rows.extend(
                 [
-                    _run_triage_command(["exiftool", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["binwalk", str(target)], cwd=cwd, timeout=12),
-                    _run_triage_command(["xxd", "-l", "256", str(target)], cwd=cwd, timeout=8),
-                    _run_triage_command(["strings", "-a", "-n", "5", str(target)], cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["exiftool", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["binwalk", str(target)], context=context, cwd=cwd, timeout=12),
+                    _run_triage_command_planned(["xxd", "-l", "256", str(target)], context=context, cwd=cwd, timeout=8),
+                    _run_triage_command_planned(["strings", "-a", "-n", "5", str(target)], context=context, cwd=cwd, timeout=8),
                 ]
             )
     elif category == "osint":
-        rows.append(_run_triage_command(["rg", "-n", r"https?://|domain|username|handle|coord|latitude|longitude|image|photo|email|@", "."], cwd=cwd, timeout=8))
+        rows.append(_run_triage_command_planned(["rg", "-n", r"https?://|domain|username|handle|coord|latitude|longitude|image|photo|email|@", "."], context=context, cwd=cwd, timeout=8))
     elif category == "ai/ml":
         rows.extend(
             [
-                _run_triage_command(["find", ".", "-maxdepth", "5", "-type", "f", "(", "-name", "*.pt", "-o", "-name", "*.pth", "-o", "-name", "*.onnx", "-o", "-name", "*.pkl", "-o", "-name", "*.safetensors", "-o", "-name", "*.json", ")"], cwd=cwd, timeout=8),
-                _run_triage_command(["rg", "-n", r"torch|tensorflow|sklearn|transformers|onnx|pickle|prompt|system|model|dataset|label", "."], cwd=cwd, timeout=8),
+                _run_triage_command_planned(["find", ".", "-maxdepth", "5", "-type", "f", "(", "-name", "*.pt", "-o", "-name", "*.pth", "-o", "-name", "*.onnx", "-o", "-name", "*.pkl", "-o", "-name", "*.safetensors", "-o", "-name", "*.json", ")"], context=context, cwd=cwd, timeout=8),
+                _run_triage_command_planned(["rg", "-n", r"torch|tensorflow|sklearn|transformers|onnx|pickle|prompt|system|model|dataset|label", "."], context=context, cwd=cwd, timeout=8),
             ]
         )
     return rows
@@ -4548,6 +4706,54 @@ def _run_triage_command(command: list[str], *, cwd: Path, timeout: int) -> dict[
         }
     except OSError as exc:
         return {"command": display, "status": "error", "reason": redact_text(str(exc)), "returncode": None, "stdout": "", "stderr": ""}
+
+
+def _run_triage_command_planned(command: list[str], *, context: Mapping[str, Any], cwd: Path, timeout: int) -> dict[str, Any]:
+    report = context.get("toolchain_report") if isinstance(context.get("toolchain_report"), Mapping) else {}
+    planned, fallback = choose_command_or_fallback(command, report)
+    if planned is None:
+        row = _run_triage_command(command, cwd=cwd, timeout=timeout)
+        if fallback:
+            row["missing_tool"] = fallback.get("tool")
+            row["fallbacks"] = fallback.get("fallbacks") or []
+        return row
+    row = _run_triage_command(planned, cwd=cwd, timeout=timeout)
+    if fallback:
+        row["fallback_for"] = fallback.get("tool")
+        row["fallback_id"] = fallback.get("fallback_id")
+        row["fallback_reason"] = fallback.get("reason")
+    return row
+
+
+def _selected_fallback_rows(command_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in command_rows:
+        tool = str(row.get("fallback_for") or "")
+        fallback_id = str(row.get("fallback_id") or "")
+        if not tool or not fallback_id:
+            continue
+        key = (tool, fallback_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"tool": tool, "fallback_id": fallback_id, "reason": str(row.get("fallback_reason") or "tool_missing")})
+    return rows
+
+
+def _skipped_tool_rows(command_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in command_rows:
+        if row.get("status") != "skipped" and not row.get("missing_tool"):
+            continue
+        rows.append(
+            {
+                "tool": str(row.get("missing_tool") or str(row.get("command") or "").split(" ", 1)[0]),
+                "reason": str(row.get("reason") or "tool_missing"),
+                "fallback_count": len(row.get("fallbacks") or []),
+            }
+        )
+    return rows[:20]
 
 
 def _category_triage_findings(
@@ -4806,6 +5012,16 @@ def _triage_next_steps(category: str, findings: list[dict[str, Any]], context: M
         steps.insert(0, "Inspect brief.md and the top local files manually; add any concrete signal to evidence.md.")
     if not context.get("remote_endpoints") and category in {"web", "pwn"}:
         steps.append("Find or record service connection info before remote testing.")
+    toolchain = context.get("toolchain_summary") if isinstance(context.get("toolchain_summary"), Mapping) else {}
+    for row in list(toolchain.get("recommended_fallbacks") or [])[:3]:
+        if not isinstance(row, Mapping):
+            continue
+        suggestions = row.get("suggestions") if isinstance(row.get("suggestions"), list) else []
+        ids = [str(item.get("id") or "") for item in suggestions if isinstance(item, Mapping) and item.get("id")]
+        if ids:
+            steps.append(f"Tool missing: {row.get('tool')}; prefer fallback {ids[0]} before installing anything.")
+        else:
+            steps.append(f"Tool missing: {row.get('tool')}; record blocker and use Docker/alternate target before installing anything.")
     return _dedupe_strings(steps)[:5]
 
 
@@ -4834,6 +5050,11 @@ def _render_triage_summary(
         f"- target_pack_path: {_md(target_pack_path or 'missing')}",
         f"- brief_path: {_md(_display(context['brief_path']) if context.get('brief_path') else 'missing')}",
         "",
+        "## Toolchain",
+        f"- available_tools: {_md(', '.join((context.get('toolchain_summary') or {}).get('available_tools') or []) or 'none')}",
+        f"- missing_critical_tools: {_md(', '.join((context.get('toolchain_summary') or {}).get('missing_critical_tools') or []) or 'none')}",
+        f"- recommended_fallbacks: {_md(_fallbacks_inline((context.get('toolchain_summary') or {}).get('recommended_fallbacks') or []))}",
+        "",
         "## Top Files",
     ]
     artifacts = [row for row in files if not str(row.get("role") or "").startswith("memo:")]
@@ -4846,7 +5067,9 @@ def _render_triage_summary(
     for row in command_rows[:20]:
         status = str(row.get("status") or "")
         reason = f" reason={_md(str(row.get('reason') or ''))}" if row.get("reason") else ""
-        lines.append(f"- `{row.get('command')}` status={_md(status)}{reason}")
+        fallback = f" fallback_for={_md(str(row.get('fallback_for')))} fallback_id={_md(str(row.get('fallback_id')))}" if row.get("fallback_for") else ""
+        missing = f" missing_tool={_md(str(row.get('missing_tool')))}" if row.get("missing_tool") else ""
+        lines.append(f"- `{row.get('command')}` status={_md(status)}{reason}{fallback}{missing}")
     lines.extend(["", "## Findings"])
     for row in findings[:30]:
         detail = str(row.get("detail") or "")
@@ -4898,6 +5121,35 @@ def _append_starter_memos(challenge_dir: Path, *, starter_path: Path, category: 
     _append_text(challenge_dir / "memory.md", f"\n- starter_{verb}: {category} starter at {_display(starter_path)} ({timestamp})\n")
     _append_text(challenge_dir / "next_steps.md", f"\n- Open {_display(starter_path)} and replace TODO hooks with the verified solve path.\n")
     _append_text(challenge_dir / "operator_notes.md", f"\n- starter_{verb}: {_display(starter_path)} ({category}, {timestamp})\n")
+
+
+def _append_missing_tool_notes(challenge_dir: Path, missing_tool: Mapping[str, Any], attempt_path: Path) -> None:
+    timestamp = utc_now()
+    tool = str(missing_tool.get("tool") or "unknown")
+    fallback = missing_tool.get("fallback") if isinstance(missing_tool.get("fallback"), Mapping) else {}
+    suggestions = fallback.get("suggestions") if isinstance(fallback.get("suggestions"), list) else []
+    suggestion_ids = [str(item.get("id") or "") for item in suggestions if isinstance(item, Mapping) and item.get("id")]
+    hint = f"; fallback={suggestion_ids[0]}" if suggestion_ids else "; fallback=record blocker or switch target"
+    install_hints = fallback.get("install_hints") if isinstance(fallback.get("install_hints"), Mapping) else {}
+    planned = "; planned_install_hint=" + next(iter(install_hints.values())) if install_hints else ""
+    _append_text(
+        challenge_dir / "attempts.md",
+        f"\n- missing_tool: {tool} blocked attempt {_display(attempt_path)} at {timestamp}{hint}{planned}\n",
+    )
+    _append_text(
+        challenge_dir / "next_steps.md",
+        f"\n- Missing tool `{tool}` blocked the latest attempt. Use fallback {', '.join(suggestion_ids[:3]) or 'from ctfctl interactive fallback'} or switch targets; do not auto-install during solve-loop.\n",
+    )
+
+
+def _missing_tool_metric_payload(missing_tool: Mapping[str, Any]) -> dict[str, Any]:
+    fallback = missing_tool.get("fallback") if isinstance(missing_tool.get("fallback"), Mapping) else {}
+    suggestions = fallback.get("suggestions") if isinstance(fallback.get("suggestions"), list) else []
+    return {
+        "tool": str(missing_tool.get("tool") or ""),
+        "fallback_ids": [str(item.get("id") or "") for item in suggestions if isinstance(item, Mapping) and item.get("id")][:5],
+        "no_auto_install": True,
+    }
 
 
 def _resolve_attempt_invocation(
@@ -5348,6 +5600,7 @@ def _starter_context_data(
     top_files = [_absolute_path(_triage_file_path(row)) for row in files if not str(row.get("role") or "").startswith("memo:")][:16]
     primary_files = _primary_triage_files(category, files)
     primary = _absolute_path(primary_files[0]) if primary_files else ""
+    toolchain = context.get("toolchain_summary") if isinstance(context.get("toolchain_summary"), Mapping) else {}
     return {
         "contest_id": contest_id,
         "challenge_id": str(item.get("challenge_id") or ""),
@@ -5360,6 +5613,9 @@ def _starter_context_data(
         "top_files": top_files,
         "primary_file": primary,
         "remote_endpoints": [str(value) for value in context.get("remote_endpoints") or []],
+        "available_tools": list(toolchain.get("available_tools") or []),
+        "missing_critical_tools": list(toolchain.get("missing_critical_tools") or []),
+        "recommended_fallbacks": list(toolchain.get("recommended_fallbacks") or []),
     }
 
 
@@ -5390,6 +5646,9 @@ EXTRACTED_DIRS = [Path(item) for item in {_py_json(data["extracted_dirs"])}]
 TOP_FILES = [Path(item) for item in {_py_json(data["top_files"])}]
 REMOTE_ENDPOINTS = {_py_json(data["remote_endpoints"])}
 PRIMARY_FILE = Path({json.dumps(data["primary_file"])}) if {json.dumps(bool(data["primary_file"]))} else None
+AVAILABLE_TOOLS = {_py_json(data["available_tools"])}
+MISSING_CRITICAL_TOOLS = {_py_json(data["missing_critical_tools"])}
+RECOMMENDED_FALLBACKS = {_py_json(data["recommended_fallbacks"])}
 
 '''
 
@@ -5397,6 +5656,7 @@ PRIMARY_FILE = Path({json.dumps(data["primary_file"])}) if {json.dumps(bool(data
 def _starter_web_source(data: Mapping[str, Any]) -> str:
     return _starter_header(data) + '''import re
 import sys
+import urllib.request
 
 try:
     import requests
@@ -5422,19 +5682,22 @@ def candidate_base_url() -> str:
 
 
 def main() -> int:
-    if requests is None:
-        print("Install requests or port this skeleton to urllib.", file=sys.stderr)
-        return 2
-    session = requests.Session()
     base_url = candidate_base_url()
     if not base_url:
         print("TODO: set base_url from challenge statement or local service.", file=sys.stderr)
         return 1
 
     # TODO: map route/auth state from TOP_FILES and replace this probe.
-    response = session.get(base_url, timeout=10)
-    print(response.status_code)
-    match = FLAG_RE.search(response.text)
+    if requests is not None:
+        session = requests.Session()
+        response = session.get(base_url, timeout=10)
+        print(response.status_code)
+        body = response.text
+    else:
+        with urllib.request.urlopen(base_url, timeout=10) as response:
+            print(response.status)
+            body = response.read().decode("utf-8", errors="replace")
+    match = FLAG_RE.search(body)
     if match:
         print(match.group(0))
         return 0
@@ -5447,26 +5710,95 @@ if __name__ == "__main__":
 
 
 def _starter_pwn_source(data: Mapping[str, Any]) -> str:
-    return _starter_header(data) + '''from pwn import *  # type: ignore
+    return _starter_header(data) + '''import os
+import re
+import socket
+import subprocess
+import sys
+
+try:
+    from pwn import *  # type: ignore
+    PWNLIB_AVAILABLE = True
+except ImportError:  # pragma: no cover - starter fallback guidance.
+    PWNLIB_AVAILABLE = False
+    args = None  # type: ignore
+    context = None  # type: ignore
 
 
-context.log_level = "info"
-if PRIMARY_FILE and PRIMARY_FILE.exists():
-    elf = ELF(str(PRIMARY_FILE), checksec=False)
-    context.binary = elf
+if PWNLIB_AVAILABLE:
+    context.log_level = "info"
+    if PRIMARY_FILE and PRIMARY_FILE.exists():
+        elf = ELF(str(PRIMARY_FILE), checksec=False)
+        context.binary = elf
+    else:
+        elf = None
 else:
     elf = None
 
 
+class SocketTube:
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+
+    def sendline(self, data: bytes) -> None:
+        self.sock.sendall(data + b"\\n")
+
+    def interactive(self) -> None:
+        self.sock.settimeout(1.0)
+        try:
+            chunk = self.sock.recv(4096)
+            if chunk:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.flush()
+        except TimeoutError:
+            pass
+
+
+class ProcessTube:
+    def __init__(self, proc: subprocess.Popen[bytes]):
+        self.proc = proc
+
+    def sendline(self, data: bytes) -> None:
+        if self.proc.stdin:
+            self.proc.stdin.write(data + b"\\n")
+            self.proc.stdin.flush()
+
+    def interactive(self) -> None:
+        stdout, stderr = self.proc.communicate(timeout=5)
+        sys.stdout.buffer.write(stdout or b"")
+        sys.stderr.buffer.write(stderr or b"")
+
+
+def arg_value(name: str, default: str = "") -> str:
+    if PWNLIB_AVAILABLE and args is not None:
+        value = getattr(args, name, None)
+        if value:
+            return str(value)
+    return os.environ.get(name, default)
+
+
+def remote_host_port() -> tuple[str, int]:
+    for endpoint in REMOTE_ENDPOINTS:
+        match = re.search(r"\\b(?:nc|ncat|netcat)\\s+(?:--ssl\\s+)?([A-Za-z0-9_.-]+)\\s+([0-9]{2,5})", endpoint)
+        if not match:
+            match = re.search(r"\\b((?:[A-Za-z0-9-]+\\.)+[A-Za-z]{2,}|localhost|127(?:\\.\\d{1,3}){3}):([0-9]{2,5})\\b", endpoint)
+        if match:
+            return match.group(1), int(match.group(2))
+    return arg_value("HOST", "127.0.0.1"), int(arg_value("PORT", "31337"))
+
+
 def start():
-    if args.REMOTE:
-        # TODO: replace with host/port from REMOTE_ENDPOINTS.
-        host = args.HOST or "127.0.0.1"
-        port = int(args.PORT or 31337)
-        return remote(host, port)
+    if arg_value("REMOTE"):
+        host, port = remote_host_port()
+        if PWNLIB_AVAILABLE:
+            return remote(host, port)
+        return SocketTube(socket.create_connection((host, port), timeout=10))
     if not PRIMARY_FILE:
         raise SystemExit("Primary binary missing; inspect TOP_FILES.")
-    return process([str(PRIMARY_FILE)])
+    if PWNLIB_AVAILABLE:
+        return process([str(PRIMARY_FILE)])
+    proc = subprocess.Popen([str(PRIMARY_FILE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return ProcessTube(proc)
 
 
 def build_payload() -> bytes:
@@ -5577,7 +5909,10 @@ CATEGORY = {json.dumps(category)}
 
 
 def run_tool(argv: list[str]) -> str:
-    completed = subprocess.run(argv, cwd=CHALLENGE_DIR, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+    try:
+        completed = subprocess.run(argv, cwd=CHALLENGE_DIR, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+    except FileNotFoundError:
+        return f"missing tool: {argv[0]}\\n"
     return completed.stdout + completed.stderr
 
 
@@ -5628,6 +5963,8 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
     category_guess = context["category_guess"]
     playbook = _category_playbook(str(category_guess["category"]))
     commands = _recommended_first_commands(item, context, playbook)
+    toolchain = context.get("toolchain_summary") if isinstance(context.get("toolchain_summary"), Mapping) else {}
+    toolchain_report = context.get("toolchain_report") if isinstance(context.get("toolchain_report"), Mapping) else {}
     aliases = _list_values(item.get("aliases"))
     artifact_sources = _list_values(item.get("artifact_sources"))
     source_ids = _list_values(item.get("source_ids"))
@@ -5660,6 +5997,12 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
         f"- extracted_dirs: {_md(', '.join(_display(Path(path)) for path in context.get('extracted_dirs') or []) or 'none')}",
         f"- manifest_paths: {_md(', '.join(_display(Path(path)) for path in context.get('manifest_paths') or []) or 'none')}",
         "",
+        "## Toolchain Capability",
+        f"- available_tools: {_md(', '.join(toolchain.get('available_tools') or []) or 'none')}",
+        f"- missing_critical_tools: {_md(', '.join(toolchain.get('missing_critical_tools') or []) or 'none')}",
+        f"- recommended_fallbacks: {_md(_fallbacks_inline(toolchain.get('recommended_fallbacks') or []))}",
+        f"- platform_notes: {_md('; '.join(str(note) for note in toolchain.get('platform_notes') or []) or 'none')}",
+        "",
         "## Remote",
     ]
     if context["remote_endpoints"]:
@@ -5690,7 +6033,8 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
     lines.extend(commands)
     lines.extend(["```", "", "## Category Playbook", f"- category: {_md(playbook['category'])}"])
     for key in ("first_commands", "common_tools", "expected_evidence", "when_to_stall", "when_to_switch_target"):
-        lines.append(f"- {key}: {_md('; '.join(playbook[key]))}")
+        values = _available_shell_commands(playbook[key], toolchain_report) if key == "first_commands" else list(playbook[key])
+        lines.append(f"- {key}: {_md('; '.join(values) if values else 'none')}")
     lines.extend(["", "## Avoid Wasted Time"])
     lines.extend(f"- {_md(item)}" for item in _avoid_wasted_time(item, context, playbook))
     lines.extend(
@@ -5738,6 +6082,7 @@ def _render_compact_brief(contest_id: str, item: Mapping[str, Any], context: Map
 
 def _recommended_first_commands(item: Mapping[str, Any], context: Mapping[str, Any], playbook: Mapping[str, Any]) -> list[str]:
     challenge_dir = Path(context["challenge_dir"]).expanduser()
+    report = context.get("toolchain_report") if isinstance(context.get("toolchain_report"), Mapping) else {}
     commands = [
         f"cd {shlex.quote(str(challenge_dir))}",
         "pwd && find . -maxdepth 3 -type f | sort | sed -n '1,120p'",
@@ -5750,26 +6095,86 @@ def _recommended_first_commands(item: Mapping[str, Any], context: Mapping[str, A
             commands.append(f"sed -n '1,220p' {shlex.quote(str(Path(context['brief_path']).expanduser()))}")
     if context.get("remote_endpoints"):
         commands.append("printf '%s\n' " + " ".join(shlex.quote(endpoint) for endpoint in context["remote_endpoints"][:4]))
-    commands.extend(playbook["first_commands"])
+        commands.extend(_remote_probe_commands(context, report))
+    commands.extend(_available_shell_commands(playbook["first_commands"], report))
     category = str(playbook.get("category") or "")
     if category in {"pwn", "rev"}:
         first_binary = _first_top_file(context, categories={"binary", "shared_library"})
         if first_binary:
-            commands.append(f"file {shlex.quote(first_binary)}")
+            if command_available(report, "file"):
+                commands.append(f"file {shlex.quote(first_binary)}")
             if category == "pwn":
-                commands.append(f"checksec --file={shlex.quote(first_binary)} || true")
-            commands.append(f"strings -a -n 4 {shlex.quote(first_binary)} | sed -n '1,120p'")
+                if command_available(report, "checksec"):
+                    commands.append(f"checksec --file={shlex.quote(first_binary)} || true")
+                elif command_available(report, "readelf"):
+                    commands.append(f"readelf -h {shlex.quote(first_binary)}")
+            if command_available(report, "strings"):
+                commands.append(f"strings -a -n 4 {shlex.quote(first_binary)} | sed -n '1,120p'")
     elif category == "web":
-        commands.append("rg -n \"route|app\\.|router\\.|render|template|session|jwt|cookie|upload|fetch|request|sql|eval|exec\" .")
+        if _shell_tool_available("rg", report):
+            commands.append("rg -n \"route|app\\.|router\\.|render|template|session|jwt|cookie|upload|fetch|request|sql|eval|exec\" .")
     elif category == "crypto":
-        commands.append("rg -n \"RSA|AES|ECC|ECDSA|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce\" .")
+        if _shell_tool_available("rg", report):
+            commands.append("rg -n \"RSA|AES|ECC|ECDSA|CBC|CTR|GCM|modulus|cipher|decrypt|encrypt|random|seed|nonce\" .")
     elif category == "forensics/misc":
-        commands.append("find raw handout extracted -maxdepth 3 -type f -print 2>/dev/null | xargs -r file")
+        if _shell_tool_available("find", report) and command_available(report, "file"):
+            commands.append("find raw handout extracted -maxdepth 3 -type f -print 2>/dev/null | xargs -r file")
     elif category == "osint":
-        commands.append("rg -n \"https?://|@|coord|lat|lon|username|handle|domain\" .")
+        if _shell_tool_available("rg", report):
+            commands.append("rg -n \"https?://|@|coord|lat|lon|username|handle|domain\" .")
     elif category == "ai/ml":
-        commands.append("find . -maxdepth 4 -type f \\( -name '*.ipynb' -o -name '*.pt' -o -name '*.pth' -o -name '*.onnx' -o -name '*.pkl' -o -name '*.safetensors' -o -name '*.json' \\) | sort")
+        if _shell_tool_available("find", report):
+            commands.append("find . -maxdepth 4 -type f \\( -name '*.ipynb' -o -name '*.pt' -o -name '*.pth' -o -name '*.onnx' -o -name '*.pkl' -o -name '*.safetensors' -o -name '*.json' \\) | sort")
     return _dedupe_strings(commands)[:14]
+
+
+def _available_shell_commands(commands: Iterable[str], report: Mapping[str, Any]) -> list[str]:
+    result: list[str] = []
+    for command in commands:
+        tool = _first_shell_tool(command)
+        if not tool or _shell_tool_available(tool, report):
+            result.append(command)
+    return result
+
+
+def _first_shell_tool(command: str) -> str:
+    head = re.split(r"\s*(?:&&|\|\||\||;)\s*", str(command or "").strip(), maxsplit=1)[0]
+    try:
+        parts = shlex.split(head)
+    except ValueError:
+        parts = head.split()
+    return parts[0] if parts else ""
+
+
+def _shell_tool_available(tool: str, report: Mapping[str, Any]) -> bool:
+    if command_available(report, tool):
+        return True
+    return shutil.which(tool) is not None
+
+
+def _remote_probe_commands(context: Mapping[str, Any], report: Mapping[str, Any]) -> list[str]:
+    endpoints = [str(value) for value in context.get("remote_endpoints") or []]
+    if not endpoints:
+        return []
+    endpoint = endpoints[0]
+    host = ""
+    port = ""
+    tls = endpoint.startswith("https://") or " --ssl " in f" {endpoint} " or endpoint.startswith("tls://")
+    nc_match = re.search(r"\b(?:nc|ncat|netcat)\s+(?:--ssl\s+)?([A-Za-z0-9_.-]+)\s+([0-9]{2,5})", endpoint)
+    host_port = re.search(r"\b((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|localhost|127(?:\.\d{1,3}){3}):([0-9]{2,5})\b", endpoint)
+    if nc_match:
+        host, port = nc_match.group(1), nc_match.group(2)
+    elif host_port:
+        host, port = host_port.group(1), host_port.group(2)
+    if not host or not port:
+        return []
+    if tls and command_available(report, "openssl"):
+        return [f"openssl s_client -connect {shlex.quote(host)}:{shlex.quote(port)} -servername {shlex.quote(host)} -quiet"]
+    if command_available(report, "ncat"):
+        return [f"ncat {shlex.quote(host)} {shlex.quote(port)}"]
+    if command_available(report, "nc"):
+        return [f"nc {shlex.quote(host)} {shlex.quote(port)}"]
+    return []
 
 
 def _first_top_file(context: Mapping[str, Any], *, categories: set[str]) -> str:
@@ -5795,7 +6200,11 @@ def _category_playbook(category: str) -> dict[str, Any]:
         },
         "pwn": {
             "category": "pwn",
-            "first_commands": ["file ./* raw/* handout/* extracted/**/* 2>/dev/null", "checksec --file ./chall 2>/dev/null || true", "python3 - <<'PY'\nfrom pwn import *\nprint('pwntools ok')\nPY"],
+            "first_commands": [
+                "file ./* raw/* handout/* extracted/**/* 2>/dev/null",
+                "checksec --file ./chall 2>/dev/null || true",
+                "python3 - <<'PY'\ntry:\n    import pwn\n    print('pwntools ok')\nexcept ImportError:\n    print('pwntools missing; use socket/subprocess fallback')\nPY",
+            ],
             "common_tools": ["file", "checksec", "strings", "gdb/pwndbg", "pwntools", "ROPgadget", "one_gadget"],
             "expected_evidence": ["protections", "crash offset", "primitive", "libc/ld match", "local exploit transcript"],
             "when_to_stall": ["no crash or primitive after bounded fuzz/manual audit", "remote-only state cannot be reproduced"],
@@ -6229,6 +6638,9 @@ def _build_metrics_summary(contest_id: str, events: list[dict[str, Any]], sessio
         "artifact_accepted_count": artifact_accepted_count,
         "artifact_rejected_count": artifact_rejected_count,
         "artifact_blocked_count": artifact_blocked_count,
+        "toolchain_checked_count": sum(1 for row in contest_events if row.get("event") == "toolchain_checked"),
+        "missing_tool_observed_count": sum(1 for row in contest_events if row.get("event") == "missing_tool_observed"),
+        "fallback_selected_count": sum(1 for row in contest_events if row.get("event") == "fallback_selected"),
         "writeup_ko_count": writeup_ko,
         "writeup_en_count": writeup_en,
         "cleanup_count": sum(1 for row in contest_events if row.get("event") == "cleanup"),
@@ -6480,6 +6892,20 @@ def _delta(before_value: Any, after_value: Any) -> int | float | None:
 
 def _md(value: str) -> str:
     return redact_text(str(value)).replace("|", "\\|")
+
+
+def _fallbacks_inline(rows: Iterable[Any]) -> str:
+    parts: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        suggestions = row.get("suggestions") if isinstance(row.get("suggestions"), list) else []
+        ids = [str(item.get("id") or "") for item in suggestions if isinstance(item, Mapping) and item.get("id")]
+        if ids:
+            parts.append(f"{row.get('tool')} -> {', '.join(ids[:4])}")
+        else:
+            parts.append(f"{row.get('tool')} -> install/planned action")
+    return "; ".join(parts) if parts else "none"
 
 
 def _parse_timestamp(value: str) -> datetime | None:

@@ -17,8 +17,10 @@ export AGENTS=4
 
 ./scripts/ctfctl preflight --deep --json
 ./scripts/ctfctl platform profile-check --config "$PROFILE" --json
+./scripts/ctfctl interactive toolchain doctor --json
 ./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
 ./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
+./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
 ./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
 ./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
@@ -91,13 +93,23 @@ ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id-or-
 ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
 ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id-or-alias> --json
+ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category forensics/misc --refresh --json
+ctfctl interactive fallback --tool cpio --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --json
 ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-1 --challenge <id> --json
 ```
 
 Default claim returns only canonical rows where `claimable` is true. If a solver requests an alias or static slug with `--challenge`, the claim resolves to the canonical challenge and returns the canonical path/name.
 
-`interactive solve-loop` is the preferred solver entrypoint. It scores or prepares a target, ensures target pack/triage/starter, runs the starter in the challenge directory, records a structured attempt, extracts local candidates, verifies candidate confidence and submit guards, submits only high-confidence candidates, and performs accepted-only writeup plus cleanup when accepted. If it reaches `--max-attempts` without an accepted candidate, it updates attempts/evidence/next steps, records stalled metrics, creates no writeup, and returns the next action so the Codex keeps moving to another problem. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
+`interactive solve-loop` is the preferred solver entrypoint. It scores or prepares a target, ensures target pack/triage/starter, runs the starter in the challenge directory, records a structured attempt, extracts local candidates, verifies candidate confidence and submit guards, submits only high-confidence candidates, and performs accepted-only writeup plus cleanup when accepted. If it reaches `--max-attempts` without an accepted candidate, it updates attempts/evidence/next steps, records stalled metrics, creates no writeup, and returns the next action so the Codex keeps moving to another problem. If the attempt fails because a tool is missing, it records `missing_tool_observed`, writes the fallback/blocker to attempts and next steps, stalls that target with evidence, and continues by selecting another target on the next loop. 대회 중 사용자의 중단 지시, 대회 종료, 모든 문제 solved/stalled-documented 외에는 계속 진행한다.
+
+Toolchain commands:
+
+- `interactive toolchain doctor --json` checks the global/local machine without requiring a contest.
+- `interactive capabilities --contest-id <id> --json` stores `operator/toolchain/capabilities.json` and `.md`, records `toolchain_checked`, and feeds target-pack/triage/starter/solve-loop.
+- `interactive fallback --tool ncat --json` returns fallback plans such as `openssl_s_client` for TLS or `nc` for plain TCP; `--tool cpio` returns `bsdtar`, Python parser, and Docker extraction paths.
+- Missing tools are not auto-installed. Hints such as Homebrew, apt, pipx, or gem commands are planned operator actions only.
+- Reports include category-specific missing high-priority tools, Docker/`ctf-pwn:latest`, and WSL/macOS notes.
 
 `interactive next` scores only canonical claimable rows by practical solve signal. With `--refresh`, it first performs one live sync using the configured profile, records sync deltas, then ranks the refreshed board:
 
@@ -115,14 +127,15 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 - challenge path, brief path, raw/handout directories, extracted directories, and manifest paths
 - remote connection info detected from board metadata or brief text
 - top interesting files from ingest manifests or local artifact fallback
+- available tools, missing critical tools, and recommended fallbacks
 - summaries and paths for `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`
 - recommended first commands, a short category playbook, wasted-time warnings, stall criteria, and writeup/cleanup reminders
 
 Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving; public upload, public writeup, public paste, and git push of flags or private artifacts remain forbidden during the contest.
 
-`interactive triage` reads only local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started` and `triage_completed` metrics.
+`interactive triage` reads only local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. Missing tools are skipped or replaced with an available fallback before being recommended as first commands. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started`, `fallback_selected`, and `triage_completed` metrics.
 
-`interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with a `requests.Session`, `exploit.py` with pwntools, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
+`interactive starter` creates a category-specific solver skeleton without creating a writeup: `solve_web.py` with requests/urllib fallback, `exploit.py` with optional pwntools plus socket/subprocess fallback, `solve_rev.py` with subprocess and optional z3 hooks, `solve_crypto.py` with parameter parsing, `solve_misc.py` for forensics/misc/OSINT helpers, or `solve_ai_ml.py` for model triage. The starter path is recorded in board and operator metadata, and `starter_created` is written to metrics.
 
 `interactive run-attempt` executes `--command` or `--script` from the challenge directory. It stores raw local stdout/stderr/returncode/runtime in `attempts/<timestamp>.json`, appends compact entries to `attempts.md` and `evidence.md`, records `attempt_started` and `attempt_completed` metrics, and extracts flag-like candidates into `candidates.jsonl`. `interactive candidates` lists the local candidate store with raw values for local solving. `interactive verify-candidate` reads a passed value, candidate file, or latest local candidate, then checks format, duplicate hash, fake-like markers, previous wrong submissions, and confidence before submit.
 
