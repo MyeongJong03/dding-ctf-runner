@@ -33,10 +33,15 @@ def test_interactive_prompt_allows_local_flag_output_and_bans_public_upload(tmp_
     result = _run_json(["interactive", "prompt", "--contest-id", "demo", "--agent", "a1", "--json"])
     prompt = result["prompt"]
 
-    assert "Local terminal output may include flags, solver output, and exploit output" in prompt
+    assert "Local terminal output may include raw flags, solver output, and exploit output" in prompt
+    assert "local operator visibility" in prompt
     assert "Do not print raw secrets" not in prompt
     assert "raw flag 출력 금지" not in prompt
-    assert "Do not publish or upload flags, writeups, exploits, tokens, cookies" in prompt
+    assert "do not publish, upload, commit, push, paste publicly, or place flags" in prompt
+    assert "tokens, cookies, sessions, browser storage/storage_state" in prompt
+    assert "include them in public snapshots" in prompt
+    assert "Public-safe metrics and snapshots" in prompt
+    assert "exclude raw flags, raw candidates, tokens, auth, and session material" in prompt
     assert "public repositories" in prompt
     assert "public pastes" in prompt
     assert "Writeups are local-only during the contest and accepted-only" in prompt

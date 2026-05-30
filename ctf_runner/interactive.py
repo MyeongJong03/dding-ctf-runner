@@ -3373,8 +3373,10 @@ Loop policy:
 - If completion_status is active, no_claimable, or needs_sync, keep going with ctfctl interactive status, prepare-target, next, or solve-loop as appropriate; do not stop after one problem.
 - Do not split into controller/solver roles. This Codex session is the solver.
 - Keep user-facing progress compact unless the user asks for detail.
-- Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
-- Do not publish or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, or auth material to public services, public repositories, public pastes, issue trackers, or external writeup locations during the contest.
+- Local terminal output may include raw flags, solver output, and exploit output when needed for solving, verification, and local operator visibility.
+- During an active contest, do not publish, upload, commit, push, paste publicly, or place flags, writeups, or exploits in public locations such as public services, public repositories, public pastes, issue trackers, public snapshots, or external writeup locations.
+- Treat tokens, cookies, sessions, browser storage/storage_state, private keys, auth headers, and auth material as secrets. Do not commit, push, paste publicly, publish, upload, or include them in public snapshots.
+- Public-safe metrics and snapshots may use hashes, lengths, statuses, and high-level blockers only; they must exclude raw flags, raw candidates, tokens, auth, and session material.
 - If the user asks what you are doing, answer from ctfctl interactive brief or the current target pack without stopping the loop.
 
 Coordination:
@@ -9206,7 +9208,7 @@ def _render_target_pack(contest_id: str, item: Mapping[str, Any], context: Mappi
             "",
             "## Writeup / Cleanup Reminders",
             "- Submit only high-confidence candidates through ctfctl interactive submit or upload-submit with guards.",
-            "- Local terminal output may include raw flags during solving; do not public paste, upload, commit, or publish flags, writeups, exploits, auth material, cookies, tokens, sessions, browser storage, or private keys during the contest.",
+            "- Local terminal output may include raw flags during solving, verification, and local operator visibility. Do not publish, upload, commit, push, paste publicly, or place flags, writeups, exploits, auth material, cookies, tokens, sessions, browser storage/storage_state, auth headers, or private keys in public locations or public snapshots during the contest.",
             "- Accepted-only writeups: ctfctl interactive writeup --languages ko,en --include-code.",
             "- Run ctfctl interactive cleanup --safe after accepted solve or before leaving a local worktree in a stable state.",
         ]
@@ -9456,7 +9458,7 @@ def _avoid_wasted_time(item: Mapping[str, Any], context: Mapping[str, Any], play
     avoid = [
         "Do not work from alias/static/artifact-source names; use the canonical challenge path and IDs above.",
         "Do not search current-event writeups; use official docs or CVEs only when local version evidence justifies it.",
-        "Do not paste raw auth, browser storage, cookies, tokens, sessions, private keys, or private artifacts into public services.",
+        "Do not paste raw auth, browser storage/storage_state, cookies, tokens, sessions, private keys, or private artifacts into public services, public pastes, public repositories, or public snapshots.",
     ]
     if not _target_has_files(item, context):
         avoid.append("No local attachments detected; do not assume hidden files exist before checking sync/download state.")

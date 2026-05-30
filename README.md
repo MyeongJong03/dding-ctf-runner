@@ -2,7 +2,7 @@
 
 `dding-ctf-runner` is a shell-first control plane for live CTF operations. The default live workflow is an interactive Codex swarm: the operator prepares board state with `ctfctl`, then opens several visible Codex terminals from `~/CTF`. Every Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
 
-This repository is public-safe by design. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, exploits, and raw flags outside git and public services.
+This repository is public-safe by design. Local terminal output may include raw flags when needed for solving, verification, and local operator visibility. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, exploits, and raw flags outside git, public snapshots, public pastes, and public services.
 
 ## What It Does
 
@@ -172,7 +172,7 @@ Keep runtime state outside this repo:
 ~/CTF/contests/
 ```
 
-Local terminal output may include flags, solver output, and exploit output when needed for solving and verification. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, auth material, downloaded private challenge files, or callback hits to public services, public repositories, public pastes, issue trackers, or external writeup locations.
+Local terminal output may include raw flags, solver output, and exploit output when needed for solving, verification, and local operator visibility. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, tokens, cookies, sessions, browser storage, private keys, auth material, downloaded private challenge files, or callback hits to public services, public repositories, public pastes, issue trackers, public snapshots, or external writeup locations.
 
 Interactive metrics are stored under the operator root in `metrics/events.jsonl`, `metrics/sessions.jsonl`, `metrics/challenge_metrics.jsonl`, `metrics/tool_benchmarks.jsonl`, `metrics/summary.json`, and `metrics/regression_report.md`. These files are local raw metrics and stay outside this repo.
 
@@ -180,10 +180,10 @@ Before the next contest, run `ctfctl interactive e2e-smoke --contest-id fake-int
 
 GitHub-managed metrics must be public-safe snapshots only:
 
-- Do not upload contest flags, writeups, exploit bodies, auth material, or private artifacts during an active contest.
+- Do not publish, upload, commit, push, paste publicly, or place contest flags, writeups, exploit bodies, auth material, or private artifacts in public locations during an active contest.
 - Unsolved challenges get stalled metrics with high-level blockers and next steps, not writeups.
-- Artifact upload public snapshots may include artifact SHA-256, size, and status only; they must not include auth, paths, raw responses, or private artifact contents.
-- Candidate public snapshots may include candidate hash, length, source, status, confidence, and timestamp only; they must not include raw candidate values.
+- Artifact upload public snapshots may include artifact SHA-256, size, and status only; they must not include auth, tokens, cookies, sessions, browser storage, auth headers, paths, raw responses, or private artifact contents.
+- Candidate public snapshots may include candidate hash, length, source, status, confidence, and timestamp only; they must not include raw flags, raw candidate values, tokens, auth, or session material.
 - After an accepted solve, run submit -> ko/en writeup -> cleanup -> metrics update -> next challenge.
 - After a stall, record memo/attempts/next_steps -> stalled metrics update -> next challenge.
 - At contest end, run `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended`, then `ctfctl interactive metrics dashboard`, then optionally commit the generated public-safe files.

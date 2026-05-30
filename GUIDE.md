@@ -1,6 +1,6 @@
 # dding CTF Runner Guide
 
-This guide is the user-facing operating manual for the interactive Codex swarm workflow. Commands use placeholders only. Keep real contest URLs, cookies, tokens, browser storage, downloads, writeups, and raw flags outside this repository.
+This guide is the user-facing operating manual for the interactive Codex swarm workflow. Commands use placeholders only. Local terminal output may include raw flags when needed for solving, verification, and local operator visibility. Keep real contest URLs, cookies, tokens, browser storage, downloads, writeups, and raw flags outside this repository, public snapshots, public pastes, and public services.
 
 For the shortest contest-day checklist, see [OPERATIONS.md](OPERATIONS.md).
 
@@ -365,7 +365,7 @@ ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind op
 ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind next_steps --append "Use the new hint to test <action>" --json
 ```
 
-Then paste the short sanitized note into the affected Codex terminal. Local terminal output may include flags, solver output, and exploit output when needed for solving and verification, but do not paste cookies, tokens, sessions, browser storage, private keys, auth material, flags, writeups, or exploits into public chats, public pastes, issue trackers, public repositories, or external writeup locations during the contest.
+Then paste the short sanitized note into the affected Codex terminal. Local terminal output may include raw flags, solver output, and exploit output when needed for solving, verification, and local operator visibility, but do not commit, push, paste publicly, publish, upload, or place cookies, tokens, sessions, browser storage, private keys, auth headers, auth material, flags, writeups, or exploits in public chats, public pastes, issue trackers, public repositories, public snapshots, or external writeup locations during the contest.
 
 ## 8. Writeup Policy
 
@@ -410,7 +410,7 @@ ctfctl interactive metrics dashboard --json
 ctfctl interactive metrics compare-public --before old-summary.public.json --after metrics/contests/$CONTEST_ID/summary.public.json --json
 ```
 
-`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, observed token totals when present, candidate hash/length/source/status metadata, and artifact upload SHA-256/size/status when present. They must not include raw candidates, raw flags, writeup bodies, exploit bodies, artifact contents, upload endpoints, local artifact paths, cookies, sessions, browser storage, private keys, raw responses, or auth material.
+`publish-snapshot` writes `summary.public.json`, `solved.public.md`, `stalled.public.md`, `approaches.public.md`, and `regression.public.md`. These files include counts, elapsed times, high-level approaches, stalled blockers, cleanup/writeup counts, observed token totals when present, candidate hash/length/source/status metadata, and artifact upload SHA-256/size/status when present. They must not include raw candidates, raw flags, writeup bodies, exploit bodies, artifact contents, upload endpoints, local artifact paths, cookies, tokens, sessions, browser storage or storage state, auth headers, private keys, raw responses, or auth material.
 
 During an active contest, public snapshot export is blocked unless both `--allow-active-contest` and `--confirm-public-safe` are provided. The normal flow is: accepted solve -> submit or accepted/active artifact upload -> ko/en writeup -> cleanup -> metrics update -> next challenge. For stalled challenges: attempts/next_steps -> stalled metrics update -> next challenge. At contest end: publish-snapshot -> dashboard -> optional git commit.
 

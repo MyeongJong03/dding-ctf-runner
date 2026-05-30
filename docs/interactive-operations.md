@@ -143,7 +143,7 @@ On success, `next` claims the selected challenge and returns `target_pack_path`.
 - summaries and paths for `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`
 - recommended first commands, a short category playbook, wasted-time warnings, stall criteria, and writeup/cleanup reminders
 
-Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving; public upload, public writeup, public paste, and git push of flags or private artifacts remain forbidden during the contest.
+Pack generation redacts auth-like material and excludes raw cookies, tokens, sessions, browser storage, storage state files, passwords, and private keys. Local terminal output may still show raw flags while solving, verifying, or giving local operator visibility; publishing, uploading, publicly pasting, committing, pushing, or otherwise placing flags, writeups, exploits, auth/session material, or private artifacts in public locations remains forbidden during the contest.
 
 `interactive triage` reads local `raw/`, `handout/`, `extracted/`, `brief.md`, manifest files, and challenge memos. Category handling includes web route/API/sink scans, pwn `file`/`checksec`/`readelf`/`strings`, rev format and string summaries, crypto parameter extraction, forensics metadata/carving helpers, local-only OSINT identifiers, and AI/ML model/dataset hints. For web targets with configured base URL it also runs the bounded `web-probe` harness, saving title/form/link/script/endpoint summaries without raw response bodies. Missing tools are skipped or replaced with an available fallback before being recommended as first commands. It writes `triage/summary.md`, `triage/files.json`, `triage/commands.jsonl`, and `triage/findings.jsonl`, then updates `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, and `operator_notes.md`. It records `triage_started`, `web_probe_completed` when applicable, `fallback_selected`, and `triage_completed` metrics.
 
@@ -172,7 +172,7 @@ ctfctl interactive web-status --contest-id "$CONTEST_ID" --challenge-id <id-or-a
 
 `web-probe` performs one bounded GET with the configured auth source. It writes `web/probes/<timestamp>.json` with status, title, forms, links, scripts, endpoint candidates, static asset path/hash summaries, and response header summaries. It intentionally stores body length/hash, not the raw response body. `browser-probe` uses Playwright when available to load the same base URL, write a screenshot, and store console/network summaries under `web/browser_probes/<timestamp>.json`. Browser network rows store method, path, status, and content type only; non-GET/HEAD and destructive-looking requests are blocked. If Playwright is unavailable, the command reports `unavailable` so local fake-web tests can skip cleanly.
 
-`web-attempt` executes either a local script or a JSON request spec and stores `web/attempts/<timestamp>.json`. Scripts receive `CTF_WEB_BASE_URL`, `CTF_WEB_AUTH_SOURCE`, source paths/env names, and `CTF_WEB_PROFILE` when configured; they do not receive raw secret values from the harness. `browser-attempt` runs a local Playwright script with artifact env vars for screenshot, console JSONL, and network JSONL, then records summaries under `web/browser_attempts/<timestamp>.json`. Both attempt commands append to `attempts.md`, update `evidence.md`, extract local candidates into `candidates.jsonl`, and write public-safe metrics with counts, lengths, status, and candidate hashes only. Local raw flag output is allowed for solving; public upload, public writeup, public paste, public git commit, and public git push remain forbidden during an active contest.
+`web-attempt` executes either a local script or a JSON request spec and stores `web/attempts/<timestamp>.json`. Scripts receive `CTF_WEB_BASE_URL`, `CTF_WEB_AUTH_SOURCE`, source paths/env names, and `CTF_WEB_PROFILE` when configured; they do not receive raw secret values from the harness. `browser-attempt` runs a local Playwright script with artifact env vars for screenshot, console JSONL, and network JSONL, then records summaries under `web/browser_attempts/<timestamp>.json`. Both attempt commands append to `attempts.md`, update `evidence.md`, extract local candidates into `candidates.jsonl`, and write public-safe metrics with counts, lengths, status, and candidate hashes only. Local raw flag output is allowed for solving, verification, and local operator visibility; publishing, uploading, publicly pasting, committing, pushing, or otherwise placing flags, writeups, exploits, raw candidates, tokens, auth, or session material in public locations or public snapshots remains forbidden during an active contest.
 
 Remote service commands:
 
@@ -328,12 +328,13 @@ Solvers should update memos whenever state changes:
 - `operator_notes`: sanitized user or teammate hints.
 
 This prevents context drift when a Codex session gets long or is resumed later.
-Local terminal output may include flags, solver output, and exploit output when
-needed for solving and verification. Do not put cookies, tokens, sessions,
+Local terminal output may include raw flags, solver output, and exploit output when
+needed for solving, verification, and local operator visibility. Do not put cookies, tokens, sessions,
 browser storage, auth headers, private keys, auth material, or secret-bearing
-exploit transcripts into memos, and do not publish or upload flags, writeups,
-exploits, or auth material to public services, public repositories, public
-pastes, issue trackers, or external writeup locations during the contest.
+exploit transcripts into memos, and do not publish, upload, commit, push, paste
+publicly, or place flags, writeups, exploits, or auth material in public
+services, public repositories, public pastes, issue trackers, public snapshots,
+or external writeup locations during the contest.
 
 ## Writeup Policy
 
@@ -392,12 +393,13 @@ public-safe snapshots only. `publish-snapshot` creates
 names, categories, elapsed times, high-level approach labels, stalled blockers,
 counts, observed token totals, candidate hash/length/source/status metadata, and
 artifact upload SHA-256/size/status, but must not include raw candidates, raw
-flags, cookies, sessions, browser storage, private keys, auth material, artifact
-contents, local artifact paths, upload endpoints, raw responses, exploit bodies,
-or full writeup bodies.
+flags, cookies, tokens, sessions, browser storage or storage state, auth headers,
+private keys, auth material, artifact contents, local artifact paths, upload
+endpoints, raw responses, exploit bodies, or full writeup bodies.
 
-During an active contest, do not upload contest writeups, flags, exploits, or
-private artifacts. Public snapshot export is blocked unless the contest is ended
+During an active contest, do not publish, upload, commit, push, paste publicly,
+or place contest writeups, flags, exploits, auth/session material, or private
+artifacts in public locations. Public snapshot export is blocked unless the contest is ended
 with `--contest-ended` or the operator explicitly provides both
 `--allow-active-contest` and `--confirm-public-safe`. Unsolved challenges get
 stalled metrics with memo/attempts/next_steps, not writeups. After an accepted

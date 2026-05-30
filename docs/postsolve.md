@@ -57,13 +57,14 @@ canonical file is written.
 
 ## Active Contest Boundary
 
-Local terminal output may include flags, solver output, and exploit output when
-needed for solving and verification. Postsolve and writeup files remain
+Local terminal output may include raw flags, solver output, and exploit output when
+needed for solving, verification, and local operator visibility. Postsolve and writeup files remain
 local-only during an active contest. Do not commit, push, paste publicly,
-publish, or upload flags, writeups, exploits, cookies, tokens, sessions, storage
-state, API keys, passwords, private keys, auth material, callback secrets, or
-shell history to public services, public repositories, public pastes, issue
-trackers, or external writeup locations during the contest.
+publish, or upload flags, writeups, exploits, cookies, tokens, sessions, browser
+storage, storage state, API keys, passwords, private keys, auth headers, auth
+material, callback secrets, or shell history to public services, public
+repositories, public pastes, issue trackers, public snapshots, or external
+writeup locations during the contest.
 
 Flags in runner-generated postsolve summaries are represented as SHA-256 hashes
 or placeholders.

@@ -6,7 +6,7 @@ Primary risks:
 - Raw flag leakage through commits, pushes, public pastes, public repositories, public services, issue trackers, screenshots, public writeups, or telemetry.
 - Interactive Codex pasted prompts leaking raw secrets, auth headers, storage state, sessions, cookies, tokens, private keys, or flags to public locations.
 - Operator files under `~/CTF/contests/<contest>/operator/` accidentally storing raw secrets, callback payloads, or private exploit transcripts that later get published.
-- Solver output mixing raw flags or raw secrets into public summaries, handoffs, telemetry, or state.
+- Solver output mixing raw flags or raw secrets into public summaries, public handoffs, telemetry, public snapshots, or public state.
 - Raw exploit transcript leakage through worker handoff files.
 - Writeup draft or skill candidate leakage through git, chat, public pastes, uploads, or public issue trackers.
 - Raw flag or exploit secret leakage through artifact archives.
@@ -52,7 +52,8 @@ Controls:
 - Strong `.gitignore` for runtime, secret, flag, download, browser, callback, and writeup paths.
 - `redact_text` on CLI and telemetry output.
 - Local-only writeups and private artifacts.
-- Local terminal output may include flags, solver output, and exploit output when needed for solving and verification.
+- Local terminal output may include raw flags, solver output, and exploit output when needed for solving, verification, and local operator visibility.
+- During an active contest, flags, writeups, exploits, tokens, cookies, sessions, browser storage, storage state, private keys, auth headers, and auth material must not be published, uploaded, committed, pushed, pasted publicly, placed in public repositories, or included in public snapshots.
 - No public git push from runner workflows.
 - The default live workflow is interactive Codex swarm: operators run `ctfctl interactive ...`, then launch visible Codex sessions with `cd ~/CTF && codex`.
 - Every interactive Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
@@ -124,7 +125,7 @@ Controls:
 - Competition workers run in a dedicated runner repo and add only specific writable directories rather than arbitrary shell state.
 - Worker wrappers omit `--model` by default so Codex product defaults can advance; concrete model pins are explicit reproducibility overrides and are reported by preflight.
 - Stale Codex install cleanup is dry-run by default and only renames confirmed older symlinks when `--apply` is passed.
-- Secrets stay outside git, runtime artifacts stay ignored, and CLI output is redacted before display.
+- Secrets stay outside git, runtime artifacts stay ignored, and public/release CLI output is redacted before display. This does not prohibit local terminal raw flag output that is needed for solving, verification, and local operator visibility.
 - `ctfctl repo public-check --json` rejects required-doc gaps, missing release scripts, repo-local runtime directories, sensitive filenames, public doc flag-like literals, and non-generic real-event references.
 - `scripts/fresh-clone-check.sh` validates a temporary public-style clone with compile, tests, release-check, preflight, interactive e2e smoke, fake CTFd smoke, and mock local E2E.
 - `scripts/history-scan.sh` reports sensitive path names across git history and sensitive HEAD patterns by file/pattern only. It does not print matched values.
@@ -166,7 +167,7 @@ Auto-submit risks and controls:
 
 - Wrong answer lockout: `max_wrong_per_challenge` and `cooldown_seconds` stop repeated attempts after rejected submissions.
 - Decoy flags: `reject_fake_like` and confidence classification block placeholder, example, dummy, and bait-like candidates.
-- Flag leakage: raw flags stay in memory only for the immediate submit call; DB rows, CLI output, and summaries store hashes and redacted previews.
+- Flag leakage: local terminal raw flag output is allowed when needed for solving, verification, and local operator visibility. Runner DB rows, public snapshots, public/release CLI output, and summaries store hashes or redacted previews only.
 - Duplicate spam: `duplicate_detection: sha256` blocks repeated terminal submissions of the same candidate.
 - Accidental live action: competition auto-submit is now default after arm, so the controls are the arm state, `--no-live-submit` opt-out, platform `allow_submission`, worker confirmation, and submit-policy approval.
 - Mode confusion: setup and rehearsal block real live submit before platform submit code is called; competition submit requires contest arm, `--confirm-competition`, profile policy, and submit policy.
