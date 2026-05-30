@@ -123,6 +123,7 @@ from .postsolve import (
     postsolve_status,
     skill_candidates_for_contest,
 )
+from .prompt_templates import TEMPLATE_KINDS, prompt_template
 from .public_check import run_public_check
 from .redact import redact_text
 from .run_mode import RUN_MODES, check_action_allowed, resolve_run_mode, target_kind_for_platform
@@ -710,6 +711,15 @@ def _cmd_interactive_prompt(args: argparse.Namespace) -> int:
     else:
         print(redact_text(str(data.get("prompt") or "")))
     return 0
+
+
+def _cmd_interactive_prompt_template(args: argparse.Namespace) -> int:
+    data = prompt_template(args.kind)
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False))
+    else:
+        print(str(data.get("prompt") or ""))
+    return 0 if data.get("status") == "ok" else 1
 
 
 def _cmd_interactive_e2e_smoke(args: argparse.Namespace) -> int:
@@ -2607,6 +2617,10 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_prompt.add_argument("--agent", required=True)
     interactive_prompt.add_argument("--json", action="store_true")
     interactive_prompt.set_defaults(func=_cmd_interactive_prompt)
+    interactive_prompt_template = interactive_sub.add_parser("prompt-template")
+    interactive_prompt_template.add_argument("--kind", choices=TEMPLATE_KINDS, default="general")
+    interactive_prompt_template.add_argument("--json", action="store_true")
+    interactive_prompt_template.set_defaults(func=_cmd_interactive_prompt_template)
     interactive_e2e = interactive_sub.add_parser("e2e-smoke")
     interactive_e2e.add_argument("--contest-id", required=True)
     interactive_e2e.add_argument("--agents", type=int, default=2)

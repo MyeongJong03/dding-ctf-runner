@@ -1,5 +1,59 @@
 # dding CTF Runner
 
+`dding-ctf-runner`는 CTF 대회 중 여러 개의 Codex 터미널을 열어 문제를 자동으로 고르고, 풀고, 제출하고, accepted 문제만 정리하게 만드는 운영 도구입니다.
+
+## 한국어 Quick Start
+
+대회 당일에는 복잡한 명령을 외울 필요가 없습니다. 대회 정보와 인증 정보를 준비하고, Codex 터미널을 여러 개 열고, 아래 프롬프트 템플릿을 붙여넣으면 됩니다.
+
+### 가장 쉬운 사용법
+
+1. 대회 정보 준비
+
+   - 대회 이름, 대회 URL, 플랫폼 종류를 적어 둡니다.
+   - DreamHack이면 `sessionid`, `csrf_token` 값을 로컬에서만 확인합니다.
+   - 라이트업을 저장할 로컬 경로를 정합니다.
+   - token, cookie, session, csrf_token, storage_state, private key, auth header는 public repo, public paste, public snapshot, public writeup에 절대 넣지 않습니다.
+
+2. Codex 터미널 여러 개 열기
+
+   - Windows WSL: 최대 6개 Codex 터미널 권장.
+   - Mac: 최대 4개 Codex 터미널 권장.
+   - 각 터미널에서 보통 아래처럼 시작합니다.
+
+   ```bash
+   cd ~/CTF
+   codex
+   ```
+
+   기본 사용법에서는 background worker를 쓰지 않습니다. `contest start-workers`, `worker_loop`, `scripts/ctf-worker-*` 방식은 legacy/advanced입니다.
+
+3. 프롬프트 템플릿 붙여넣기
+
+   - 일반 CTF: [docs/prompt-templates.ko.md](docs/prompt-templates.ko.md)의 "일반 CTF 자동화 프롬프트"를 붙여넣고 `[]` 부분만 바꿉니다.
+   - DreamHack: 같은 문서의 "DreamHack sessionid/csrf_token 프롬프트"를 붙여넣고 `[]` 부분만 바꿉니다.
+   - 템플릿만 출력하려면 아래 명령을 쓸 수 있습니다. 실제 `sessionid`나 `csrf_token`을 CLI 인자로 넘기지 않습니다.
+
+   ```bash
+   ./scripts/ctfctl interactive prompt-template --kind general
+   ./scripts/ctfctl interactive prompt-template --kind dreamhack
+   ./scripts/ctfctl interactive prompt-template --kind dreamhack --json
+   ```
+
+복잡한 `ctfctl` 명령은 Codex가 필요할 때 사용합니다. 사용자는 긴 명령 목록을 먼저 외우지 말고, 대회 정보와 템플릿의 `[]` 값만 채워서 시작하면 됩니다.
+
+## 운영 정책 요약
+
+- 로컬 터미널 raw flag 출력은 풀이, 검증, 로컬 운영자 확인 목적이면 허용됩니다.
+- 대회 중 flag, exploit, solver, writeup은 public upload, commit, push, paste, public issue, public snapshot, public writeup에 올리지 않습니다.
+- token, cookie, session, csrf_token, storage_state, private key, auth header는 public 위치에 절대 포함하지 않습니다.
+- writeup은 accepted된 문제만 한국어로 작성합니다.
+- 기본 파일명은 `[분야]문제명_WriteUp.md` 형식입니다.
+- exploit/solver code가 있으면 writeup에 전체 코드를 포함합니다.
+- 못 푼 문제와 stalled 문제의 writeup은 작성하지 않습니다. `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`만 남깁니다.
+
+## Reference
+
 `dding-ctf-runner` is a shell-first control plane for live CTF operations. The default live workflow is an interactive Codex swarm: the operator prepares board state with `ctfctl`, then opens several visible Codex terminals from `~/CTF`. Every Codex terminal is an autonomous solver. There is no controller/solver split in the default path.
 
 This repository is public-safe by design. Local terminal output may include raw flags when needed for solving, verification, and local operator visibility. Keep real contest URLs, auth material, downloaded private files, runtime state, writeups, exploits, and raw flags outside git, public snapshots, public pastes, and public services.
@@ -26,7 +80,7 @@ This repository is public-safe by design. Local terminal output may include raw 
 
 Use Windows WSL as the primary heavy runner. Keep this repo on the WSL Linux filesystem, not `/mnt/c`. macOS is supported as a secondary/mobile runner; Apple Silicon can use Docker Desktop emulation for linux/amd64 images, but pwn/rev-heavy work should prefer Windows WSL unless Mac timing has been validated.
 
-## Quick Start
+## Advanced Reference: Install And Manual Init
 
 ```bash
 git clone <repo-url> dding-ctf-runner
@@ -143,14 +197,13 @@ ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id-or
 
 This manual fallback writes `external_solved.txt`, marks the canonical row `solved_by_external` with `solved_source=external_solved_txt`, records `external_solved_recorded`, and releases claim locks for aliases/artifact sources. Platform-solved teammate work does not create this agent's accepted writeup; writeups still require local accepted evidence.
 
-Writeups are accepted-only. Accepted challenges produce both Korean and English files named:
+Writeups are accepted-only. The Korean contest template policy writes accepted problems only, using:
 
 ```text
-[category]ChallengeNameWriteup.ko.md
-[category]ChallengeNameWriteup.en.md
+[category]ChallengeName_WriteUp.md
 ```
 
-If solver or exploit code exists, include the complete code in fenced markdown blocks. Unsolved challenges do not get writeups; leave compact `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records instead.
+If solver or exploit code exists, include the complete code in fenced markdown blocks. Unsolved challenges do not get writeups; leave compact `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records instead. The advanced `ctfctl interactive writeup` command can still emit local ko/en files when explicitly requested, but the public handoff policy remains accepted-only Korean writeups and no unsolved writeups.
 
 For wasm/file/artifact-submit challenges, save official endpoint metadata before uploading:
 
@@ -207,6 +260,7 @@ python3 -m pytest -q
 ./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
 ./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json  # expected blocked
 ./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1
+./scripts/ctfctl interactive prompt-template --kind dreamhack --json
 ./scripts/release-check.sh
 ./scripts/ctfctl repo public-check --json
 ./scripts/fresh-clone-check.sh
@@ -222,6 +276,7 @@ Do not push public git changes from this repo during live CTF work.
 
 - [GUIDE.md](GUIDE.md): end-to-end interactive operating guide.
 - [OPERATIONS.md](OPERATIONS.md): short contest-day runbook.
+- [docs/prompt-templates.ko.md](docs/prompt-templates.ko.md): Korean copy-paste prompt templates.
 - [docs/interactive-operations.md](docs/interactive-operations.md): interactive CLI and operator file details.
 - [docs/contest-operations.md](docs/contest-operations.md): legacy/advanced background worker controls.
 - [docs/worker-loop.md](docs/worker-loop.md): legacy worker loop reference.

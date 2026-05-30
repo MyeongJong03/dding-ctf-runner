@@ -38,6 +38,7 @@ def test_public_check_docs_and_gitignore_coverage_ok(tmp_path: Path):
     assert "interactive_e2e_smoke" in result["interactive_test_commands"]
     assert "interactive_metrics_baseline" in result["interactive_test_commands"]
     assert "interactive_prompt" in result["interactive_test_commands"]
+    assert "interactive_prompt_template" in result["interactive_test_commands"]
     assert "legacy_mock_full_rehearsal" in result["legacy_advanced_test_commands"]
     assert "mock_full_rehearsal" not in result["test_commands"]
     assert "fresh_clone_check" in result["test_commands"]
@@ -210,6 +211,7 @@ def _required_docs() -> list[str]:
         "docs/postsolve.md",
         "docs/threat-model.md",
         "docs/ingest.md",
+        "docs/prompt-templates.ko.md",
     ]
 
 

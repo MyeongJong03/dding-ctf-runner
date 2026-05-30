@@ -72,6 +72,7 @@ REQUIRED_DOCS = (
     "docs/postsolve.md",
     "docs/threat-model.md",
     "docs/ingest.md",
+    "docs/prompt-templates.ko.md",
 )
 
 EXPECTED_GITIGNORE_PATTERNS = (
@@ -226,6 +227,7 @@ def run_public_check(
         "interactive_capabilities": "./scripts/ctfctl interactive capabilities --contest-id release-interactive-smoke --json",
         "interactive_fallback": "./scripts/ctfctl interactive fallback --tool ncat --json",
         "interactive_prompt": "./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1",
+        "interactive_prompt_template": "./scripts/ctfctl interactive prompt-template --kind dreamhack",
         "interactive_next": "./scripts/ctfctl interactive next --contest-id release-interactive-smoke --agent smoke-1 --dry-run --json",
         "interactive_target_pack": "./scripts/ctfctl interactive target-pack --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",
         "interactive_triage": "./scripts/ctfctl interactive triage --contest-id release-interactive-smoke --challenge-id <id> --agent smoke-1 --json",

@@ -1,234 +1,98 @@
-# Contest-Day Runbook
+# 대회 당일 Runbook
 
-Default operation is an interactive Codex swarm. Do not start background workers for normal live play.
+이것만 하면 됩니다. 복잡한 내부 명령은 Codex가 필요할 때 사용합니다.
 
-## 1. Prepare
+## 1. 시작
 
-```bash
-cd ~/dding-ctf-runner
-export CONTEST_ID=<contest>
-export PROFILE=~/.ctf-solver/platforms/<contest>.yaml
-export AGENTS=4
+1. 대회 정보 준비:
+   - 대회 이름: `[대회명]`
+   - 대회 URL: `[대회 URL]`
+   - 플랫폼: `[DreamHack / CTFd / Generic / 기타]`
+   - 라이트업 저장 경로: `[로컬 경로]`
 
-./scripts/ctfctl preflight --deep --json
-./scripts/ctfctl platform profile-check --config "$PROFILE" --json
-./scripts/ctfctl interactive toolchain doctor --json
-./scripts/ctfctl interactive e2e-smoke --contest-id fake-interactive-smoke --agents 2 --json
-./scripts/ctfctl interactive init --contest-id "$CONTEST_ID" --profile "$PROFILE" --agents "$AGENTS" --json
-./scripts/ctfctl interactive capabilities --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl interactive sync --contest-id "$CONTEST_ID" --profile "$PROFILE" --live --download --ingest --pull-solved --json
-./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
-```
+2. Codex 터미널 열기:
+   - Windows WSL: 최대 6개 권장.
+   - Mac: 최대 4개 권장.
 
-Use `--agents 6` on a strong Windows WSL machine. Use `--agents 4` on MacBook.
+   ```bash
+   cd ~/CTF
+   codex
+   ```
 
-The interactive smoke is local-only. It loads fake challenges, exercises claim,
-accepted submit, solved/submission records, ko/en accepted-only writeups with
-full solver code, cleanup, stalled metrics without writeups, metrics summary,
-next claim, and duplicate-claim guards. Use `--keep-runtime` only when you need
-to inspect the generated local operator files.
+3. 프롬프트 붙여넣기:
+   - 일반 대회: [docs/prompt-templates.ko.md](docs/prompt-templates.ko.md)의 일반 템플릿.
+   - DreamHack: 같은 문서의 `sessionid`/`csrf_token` 템플릿.
+   - `[]` 부분만 바꿉니다.
 
-## 2. Start Codex
+   템플릿만 출력:
 
-Generate prompts:
+   ```bash
+   ./scripts/ctfctl interactive prompt-template --kind general
+   ./scripts/ctfctl interactive prompt-template --kind dreamhack
+   ```
 
-```bash
-./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-1
-./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-2
-./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-3
-./scripts/ctfctl interactive prompt --contest-id "$CONTEST_ID" --agent agent-4
-```
+`sessionid`, `csrf_token`, cookie, token 같은 raw secret은 CLI 인자로 넘기지 않습니다.
 
-In each solver terminal:
+## 2. 중단
 
-```bash
-cd ~/CTF
-codex
-```
-
-Paste one prompt per terminal. Every terminal is an autonomous solver: refresh when requested, next/claim, read the target pack, solve, verify, submit, writeup, cleanup, next. It keeps going until the user stops it, the contest ends, or all challenges are solved/external_solved/stalled-documented.
-
-## 3. During The Contest
-
-Monitor board:
-
-```bash
-./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl interactive status --contest-id "$CONTEST_ID" --json
-```
-
-Board sync is canonical-first. Alias/static shell rows stay in `board.json` under the canonical challenge as `aliases`, `artifact_sources`, and `source_ids`; default claims skip them. Use `interactive sync --pull-solved` when the platform exposes team solved/submission state. Platform solved names, including aliases or static slugs, are resolved onto the canonical row as `solved_by_platform`, `solved_source=platform`, `solved_synced_at`, and `solved_aliases`. Check `canonical_count`, `new_count`, `updated_count`, `alias_count`, `skipped_static_count`, `claimable_count`, `solved_synced_count`, and `solved_status_source` after sync if the platform publishes duplicate rows.
-
-There is no background refresh loop. To pick up newly released problems, run one visible refresh through `interactive sync --live --pull-solved`, `interactive next --refresh`, or `interactive prepare-target --refresh`. Refresh through `next` and `prepare-target` pulls solved status when available, so already platform-solved canonical challenges are skipped before ranking. Those commands record `sync_completed`, `solved_sync_completed`, new challenge deltas, solved/external_solved changes, stale claims, and no-work states in local metrics.
-
-Pick or prepare the next target:
-
-```bash
-ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --json
-ctfctl interactive solve-loop --contest-id "$CONTEST_ID" --agent agent-1 --challenge-id <id> --max-attempts 5 --json
-ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --json
-ctfctl interactive prepare-target --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
-ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --json
-ctfctl interactive next --contest-id "$CONTEST_ID" --agent agent-1 --refresh --profile "$PROFILE" --json
-ctfctl interactive target-pack --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
-ctfctl interactive triage --contest-id "$CONTEST_ID" --challenge-id <id> --agent agent-1 --json
-ctfctl interactive starter --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive run-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script <path> --json
-ctfctl interactive web-config --contest-id "$CONTEST_ID" --challenge-id <id> --base-url <url> --auth-source none --json
-ctfctl interactive web-probe --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive browser-probe --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive web-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script solve_web.py --json
-ctfctl interactive browser-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --script solve_browser.py --json
-ctfctl interactive web-status --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive service-config --contest-id "$CONTEST_ID" --challenge-id <id> --host <host> --port <port> --tls --token-source none --json
-ctfctl interactive service-probe --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive service-attempt --contest-id "$CONTEST_ID" --challenge-id <id> --payload-file <path> --json
-ctfctl interactive service-status --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive candidates --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive verify-candidate --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive brief --contest-id "$CONTEST_ID" --challenge-id <id> --json
-ctfctl interactive capabilities --contest-id "$CONTEST_ID" --category pwn --refresh --json
-ctfctl interactive fallback --tool ncat --json
-```
-
-`solve-loop` is the default Codex harness after prompt startup: it selects or prepares a target, ensures target pack/triage/starter, runs the starter as a structured attempt, extracts local candidates, verifies confidence and submit guards, submits high-confidence candidates, then writes ko/en writeups, runs cleanup, updates metrics, and continues. If it exhausts `--max-attempts`, it updates attempts/next steps, records stalled metrics, creates no writeup, and continues to the next challenge. If an attempt fails because a tool is missing, it records `missing_tool_observed`, writes the fallback/blocker into attempts and next steps, stalls that target with evidence, and moves on rather than auto-installing.
-
-`interactive toolchain doctor` checks global/local commands without contest state. `interactive capabilities` stores `operator/toolchain/capabilities.json` and `.md`, records `toolchain_checked`, and feeds target packs, triage, starters, and solve-loop. Reports include category availability, missing high-priority tools, Docker/`ctf-pwn:latest`, platform notes for WSL/macOS, and fallback suggestions. There is no automatic sudo/install; install commands are only planned operator actions. Use `interactive fallback --tool cpio` or `--tool ncat` to get focused alternatives such as `bsdtar`, Python extraction, `openssl s_client`, or plain `nc`.
-
-`prepare-target` is the manual Codex starter: it runs `next` when needed, generates the target pack, runs category triage, creates a starter skeleton, and returns the key paths plus first commands and next steps. With `--refresh`, it performs the same single sync path as `next --refresh` first. `next` prefers canonical challenges with attachments, remote endpoints, configured web base URLs, confident categories, existing progress, or clear `next_steps`. It skips alias/static rows and locally solved/platform-solved/external-solved/stalled-documented work. `status` reports `completion_status`: `active`, `needs_sync`, `no_claimable`, `all_solved`, or `all_solved_or_stalled`, plus `solved_by_platform_count`, `solved_by_external_count`, and `solved_sync_available`; stop only for contest end, explicit user stop, `all_solved`, or `all_solved_or_stalled`. `target-pack` records the paths, aliases, artifact sources, web metadata, service metadata, remote info, toolchain summary, memory summaries, recommended commands, and category playbook. `triage` writes `triage/summary.md`, `files.json`, `commands.jsonl`, and `findings.jsonl`, then updates local memos and records `web_probe_completed` for configured web targets and `fallback_selected` when it substitutes a command. `starter` creates a fallback-aware category solve skeleton and records it in board/operator metadata. `run-attempt` records raw local stdout/stderr/returncode/runtime in `attempts/`, updates `attempts.md`, extracts candidates into `candidates.jsonl`, and emits attempt metrics. `web-config`, `web-probe`, `browser-probe`, `web-attempt`, `browser-attempt`, and `web-status` standardize web targets, requests/Playwright probes, screenshots, console/network summaries, request specs, and `web_*`/`browser_*` metrics. `service-config`, `service-probe`, `service-attempt`, and `service-status` standardize nc/ncat/openssl services, TLS/plain probing, token prompt injection, optional PoW helper execution, sanitized local transcripts, and `service_*` metrics. `candidates` displays local raw candidate values; public snapshots include only candidate hash, length, source, status, confidence, and timestamp. Use `brief` to answer a user status question such as "지금 뭐 하고 있음?" without stopping the solve loop.
-
-For web/browser work, `web-config` stores only the base URL and auth source metadata (`none`, `profile`, `cookie-file`, `header-file`, `storage-state`, or `env`). It saves paths or env var names, never raw cookie values, header values, storage-state JSON contents, passwords, private keys, or tokens. `web-probe` stores title/forms/links/scripts/endpoint candidates and header summaries under `web/probes/` without raw response bodies. `browser-probe` stores screenshots plus console/network summaries under `web/browser_probes/`; Playwright absence is reported as unavailable. `web-attempt` and `browser-attempt` pass base URL/source metadata through environment variables, store local-only attempt artifacts, and extract candidates. Local raw flag output remains allowed for solving, verification, and local operator visibility; publishing, uploading, publicly pasting, committing, pushing, or placing flags, writeups, exploits, auth/session material, private artifacts, or unsolved writeups in public locations remains forbidden during an active contest.
-
-Add operator information:
-
-```bash
-ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind operator_notes --append "short sanitized note" --json
-ctfctl interactive memo --contest-id "$CONTEST_ID" --challenge-id <id> --kind next_steps --append "next action" --json
-```
-
-Intentionally duplicate one local claim:
-
-```bash
-ctfctl interactive claim --contest-id "$CONTEST_ID" --agent agent-2 --challenge <id> --allow-duplicate --json
-```
-
-Record an outside solve:
-
-```bash
-ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> --json
-```
-
-The `<id>` may be a canonical challenge, alias, static slug, or artifact source. This is the fallback when another teammate solved the challenge but team-solved state did not appear in platform sync.
-
-Manual `external-solved` writes `external_solved.txt`, marks the canonical row `solved_by_external` with `solved_source=external_solved_txt`, records `external_solved_recorded`, and releases any local claim locks that mention the canonical ID, aliases, source IDs, or artifact sources. A platform-solved teammate solve does not create this agent's accepted writeup; writeups remain accepted-only unless there is local evidence and the user asks.
-
-## 4. Submit And Writeup
-
-Submit flag from a local file:
-
-```bash
-ctfctl interactive submit --contest-id "$CONTEST_ID" --challenge-id <id> --flag-file <path> --confirm --json
-```
-
-Submit upload artifact:
-
-```bash
-ctfctl interactive submit-config --contest-id "$CONTEST_ID" --challenge-id <id> --submit-type artifact_upload --endpoint https://example.invalid/submit --field-name file --json
-ctfctl interactive upload-submit --contest-id "$CONTEST_ID" --challenge-id <id> --artifact <path> --confirm --json
-```
-
-For rfc1149b-like wasm/file challenges, keep the built artifact local and upload only through `upload-submit`. The command blocks if no official endpoint metadata exists or if the endpoint is outside the profile `base_url` origin. Local records include artifact SHA-256, size, timestamp, response status, and active status.
-
-Writeups are accepted-only:
-
-```bash
-ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
-```
-
-Expected filenames:
+Codex에게 이렇게 말합니다.
 
 ```text
-[category]ChallengeNameWriteup.ko.md
-[category]ChallengeNameWriteup.en.md
+지금 진행 중인 시도를 안전하게 정리하고 멈춰라. raw secret이나 flag를 public에 남기지 말고, memory/evidence/attempts/next_steps만 compact하게 기록해라.
 ```
 
-If solver/exploit code exists, include the full code. Do not write writeups for unsolved problems; leave memos and a stalled record.
+Codex는 사용자가 중단하라고 하기 전까지, 대회가 끝나기 전까지, 또는 모든 문제가 solved/stalled 처리되기 전까지 임의로 멈추지 않아야 합니다.
 
-## 5. Cleanup
+## 3. 재개
 
-Per challenge:
+새 Codex 터미널을 열고 [docs/prompt-templates.ko.md](docs/prompt-templates.ko.md)의 "이어서 진행 프롬프트"를 붙여넣습니다. `[]` 부분에 기존 작업 디렉터리와 agent id만 채웁니다.
+
+Codex는 먼저 아래 파일을 읽고 이어서 진행해야 합니다.
+
+- `memory.md`
+- `evidence.md`
+- `attempts.md`
+- `next_steps.md`
+- `operator_notes.md`
+- 기존 solver/exploit 파일
+
+## 4. 팀원이 푼 문제 반영
+
+플랫폼 sync가 팀 solve 상태를 자동으로 보여주지 않으면, Codex에게 "팀원이 푼 문제 반영 프롬프트"를 붙여넣거나 아래처럼 지시합니다.
+
+```text
+[문제명 또는 challenge id]는 팀원이 이미 풀었다. ctfctl interactive external-solved로 로컬 보드에 반영하고, 이 문제는 다시 풀지 마라. 내 accepted 증거가 없으므로 writeup은 작성하지 마라.
+```
+
+Codex가 사용할 핵심 명령:
 
 ```bash
-ctfctl interactive cleanup --contest-id "$CONTEST_ID" --challenge-id <id> --safe --json
+ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id-or-alias> --json
 ```
 
-Contest resources:
+## 5. Metrics Snapshot
+
+대회 중에는 public snapshot, public paste, public writeup, public commit/push를 하지 않습니다.
+
+대회가 끝난 뒤에만 public-safe snapshot을 만듭니다.
 
 ```bash
-./scripts/ctfctl contest cleanup-resources --contest-id "$CONTEST_ID" --json
-./scripts/ctfctl docker pool-stop --contest-id "$CONTEST_ID" --json
+ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json
+ctfctl interactive metrics dashboard --json
 ```
 
-Final check:
+public-safe snapshot에는 raw flag, raw candidate, token, cookie, session, csrf_token, storage_state, private key, auth header, private artifact 내용이 들어가면 안 됩니다.
 
-```bash
-./scripts/ctfctl interactive board --contest-id "$CONTEST_ID" --json
-```
+## 6. 절대 지킬 정책
 
-## 6. Windows And Mac Notes
+- 로컬 터미널 raw flag 출력은 풀이, 검증, 로컬 운영자 확인 목적이면 허용됩니다.
+- public upload/commit/push/paste/writeup/snapshot에는 flag, exploit, solver, writeup, token, cookie, session, csrf_token, storage_state, private key, auth header를 절대 넣지 않습니다.
+- writeup은 accepted된 문제만 한국어로 작성합니다.
+- 파일명은 `[분야]문제명_WriteUp.md` 형식을 사용합니다.
+- exploit/solver code가 있으면 전체 코드를 포함합니다.
+- 못 푼 문제와 stalled 문제의 writeup은 금지입니다.
+- background worker 방식은 legacy/advanced입니다. 기본 대회 운영에서는 보이는 Codex 터미널을 사용합니다.
 
-- Windows WSL is the preferred primary runner for pwn/rev-heavy work.
-- Keep the repo on WSL ext4, not `/mnt/c`.
-- Windows can run up to 6 Codex terminals if CPU/RAM and platform rate limits allow.
-- MacBook should default to 4 Codex terminals.
-- On macOS, keep Docker workspaces outside `~/CTF`:
+## Advanced
 
-```bash
-export CTF_DOCKER_WORKSPACE_ROOT="$HOME/.ctf-solver/runner-state/docker-workspaces"
-```
-
-## 7. Do Not Leak
-
-Local terminal output may include raw flags, solver output, and exploit output when needed for solving, verification, and local operator visibility. During an active contest, do not commit, push, paste publicly, publish, or upload flags, writeups, exploits, cookies, tokens, sessions, browser storage, auth headers, passwords, private keys, callback hits, or downloaded private files to public services, public repositories, public pastes, issue trackers, public snapshots, or external writeup locations. Store submitted flags as hashes in runner state.
-
-Record/update local metrics when comparing runner changes. Local raw metrics are private operator state:
-
-```bash
-ctfctl interactive metrics summary --contest-id "$CONTEST_ID" --json
-ctfctl interactive metrics report --contest-id "$CONTEST_ID" --json
-```
-
-GitHub metrics are public-safe snapshots only. Do not publish, upload, commit, push, paste publicly, or place contest writeups, flags, exploit bodies, auth material, or private artifacts in public locations during an active contest. Public-safe metrics exclude raw flags, raw candidates, tokens, cookies, sessions, browser storage, auth headers, private keys, auth material, and raw transcripts. Unsolved challenges get stalled metrics with compact blockers, not writeups.
-
-Use this operational order:
-
-- Accepted solve: submit -> writeup ko/en -> cleanup -> metrics update -> next challenge.
-- Stalled challenge: attempts/next_steps -> stalled metrics update -> next challenge.
-- Contest end: `ctfctl interactive metrics publish-snapshot --contest-id "$CONTEST_ID" --contest-ended --json` -> `ctfctl interactive metrics dashboard --json` -> optional git commit.
-
-`publish-snapshot` is blocked during a contest unless both `--allow-active-contest` and `--confirm-public-safe` are explicitly set.
-
-## 8. Legacy Background Workers
-
-`contest start-workers`, `worker_loop`, `worker_supervisor`, `multi_worker`, and `scripts/ctf-worker-*` are legacy/advanced. They are for rehearsals and explicit automation experiments, not the normal contest-day runbook.
-
-## 9. Pre-Release Check
-
-Use the interactive-first release gate before public docs or release changes:
-
-```bash
-python3 -m compileall -q ctf_runner
-python3 -m pytest -q
-./scripts/ctfctl interactive init --contest-id release-interactive-smoke --writeup-root /tmp/dding-ctf-runner-release-writeups --agents 2 --json
-./scripts/ctfctl interactive e2e-smoke --contest-id release-interactive-e2e --agents 2 --json
-./scripts/ctfctl interactive metrics baseline --name release-smoke --output-dir /tmp/dding-ctf-runner-release-metrics --json
-./scripts/ctfctl interactive metrics publish-snapshot --contest-id active-contest-block-smoke --json  # expected blocked
-./scripts/ctfctl interactive prompt --contest-id release-interactive-smoke --agent smoke-1
-./scripts/release-check.sh
-./scripts/ctfctl repo public-check --json
-./scripts/fresh-clone-check.sh
-./scripts/history-scan.sh
-git diff --check
-```
-
-`release-check.sh`, `public-check`, and `fresh-clone-check.sh` should center interactive init, e2e smoke, metrics, prompt generation, and active-contest public snapshot blocking. Legacy worker/full-rehearsal coverage may remain, but only as advanced compatibility coverage.
+세부 명령과 내부 동작은 [GUIDE.md](GUIDE.md)와 [docs/interactive-operations.md](docs/interactive-operations.md)를 봅니다. legacy background worker 문서는 [docs/contest-operations.md](docs/contest-operations.md)와 [docs/worker-loop.md](docs/worker-loop.md)에만 둡니다.

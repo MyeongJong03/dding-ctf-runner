@@ -71,8 +71,8 @@ summary = {
     "legacy_advanced_test_commands": sorted(legacy_commands),
 }
 print(summary)
-required_commands = {"compileall", "pytest", "preflight", "interactive_init", "interactive_e2e_smoke", "interactive_metrics_baseline", "interactive_metrics_publish_snapshot_active_block", "interactive_prompt", "fresh_clone_check", "history_scan"}
-required_interactive = {"interactive_init", "interactive_e2e_smoke", "interactive_metrics_baseline", "interactive_metrics_publish_snapshot_active_block", "interactive_prompt"}
+required_commands = {"compileall", "pytest", "preflight", "interactive_init", "interactive_e2e_smoke", "interactive_metrics_baseline", "interactive_metrics_publish_snapshot_active_block", "interactive_prompt", "interactive_prompt_template", "fresh_clone_check", "history_scan"}
+required_interactive = {"interactive_init", "interactive_e2e_smoke", "interactive_metrics_baseline", "interactive_metrics_publish_snapshot_active_block", "interactive_prompt", "interactive_prompt_template"}
 missing_command_summaries = sorted(required_commands - set(commands))
 missing_interactive_summaries = sorted(required_interactive - set(interactive_commands))
 if data.get("status") != "ok" or not uv_lock.get("policy_ok") or missing_command_summaries or missing_interactive_summaries:
@@ -104,6 +104,22 @@ prompt = str(data.get("prompt") or "")
 summary = {"status": data.get("status"), "contest_id": data.get("contest_id"), "agent": data.get("agent")}
 print(summary)
 if data.get("status") != "ok" or "ctfctl interactive claim" not in prompt:
+    raise SystemExit(1)
+PY
+
+echo "[release-check] interactive prompt-template"
+interactive_prompt_template_json="$tmpdir/interactive-prompt-template.json"
+./scripts/ctfctl interactive prompt-template --kind dreamhack --json > "$interactive_prompt_template_json"
+python3 - "$interactive_prompt_template_json" <<'PY'
+import json
+import sys
+
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+prompt = str(data.get("prompt") or "")
+summary = {"status": data.get("status"), "kind": data.get("kind")}
+print(summary)
+required = ["sessionid: [SESSIONID]", "csrf_token: [CSRF_TOKEN]", "로컬 터미널에 출력해도 된다", "public repo"]
+if data.get("status") != "ok" or data.get("kind") != "dreamhack" or any(item not in prompt for item in required):
     raise SystemExit(1)
 PY
 

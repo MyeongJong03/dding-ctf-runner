@@ -1,8 +1,112 @@
 # dding CTF Runner Guide
 
-This guide is the user-facing operating manual for the interactive Codex swarm workflow. Commands use placeholders only. Local terminal output may include raw flags when needed for solving, verification, and local operator visibility. Keep real contest URLs, cookies, tokens, browser storage, downloads, writeups, and raw flags outside this repository, public snapshots, public pastes, and public services.
+이 문서는 대회 중 한국어 사용자가 바로 운영할 수 있게 정리한 상세 가이드입니다. 기본 흐름은 여러 개의 보이는 Codex 터미널을 열고, 각 터미널에 복붙용 프롬프트를 넣어 autonomous solver로 돌리는 방식입니다.
 
 For the shortest contest-day checklist, see [OPERATIONS.md](OPERATIONS.md).
+
+## 한국어 상세 가이드
+
+### 1. 준비
+
+대회 전에 아래만 준비합니다.
+
+- 대회 이름, 대회 URL, 플랫폼 종류.
+- 사용할 Codex 터미널 개수: Windows WSL은 최대 6개, Mac은 최대 4개 권장.
+- 로컬 라이트업 저장 경로.
+- 필요한 경우 `~/dding-ctf-runner` 설치와 `~/CTF` 작업 디렉터리.
+
+복잡한 `ctfctl` 명령은 처음부터 외우지 않아도 됩니다. Codex가 템플릿 지시에 따라 필요할 때 `ctfctl interactive status`, `prepare-target`, `next`, `run-attempt`, `submit`, `writeup`, `cleanup` 등을 사용합니다.
+
+### 2. 인증 정보 제공
+
+인증 정보는 로컬 작업에만 사용합니다. DreamHack이면 보통 `sessionid`와 `csrf_token`을 템플릿의 `[]` 부분에 채웁니다. raw 값을 CLI 인자로 넘기지 마세요. shell history에 남을 수 있습니다.
+
+절대 public에 포함하면 안 되는 값:
+
+- token
+- cookie
+- session 또는 sessionid
+- csrf_token
+- storage_state
+- private key
+- auth header
+
+### 3. Codex 실행
+
+각 solver 터미널에서 아래처럼 실행합니다.
+
+```bash
+cd ~/CTF
+codex
+```
+
+그 다음 [docs/prompt-templates.ko.md](docs/prompt-templates.ko.md)에서 맞는 템플릿을 복사하고 `[]` 부분만 바꿔 붙여넣습니다. 템플릿만 출력하려면 runner repo에서 아래 명령을 사용할 수 있습니다.
+
+```bash
+./scripts/ctfctl interactive prompt-template --kind general
+./scripts/ctfctl interactive prompt-template --kind dreamhack
+./scripts/ctfctl interactive prompt-template --kind dreamhack --json
+```
+
+기본 사용법에서는 background worker를 시작하지 않습니다. `contest start-workers`, `worker_loop`, `worker_supervisor`, `multi_worker`, `scripts/ctf-worker-*`는 legacy/advanced입니다.
+
+### 4. 문제 풀이 루프
+
+각 Codex 터미널은 아래 순서를 계속 반복합니다.
+
+1. 문제 목록과 현재 상태를 확인합니다.
+2. 다른 로컬 Codex가 잡지 않은 문제를 고릅니다.
+3. 문제 설명과 첨부 파일을 확인합니다.
+4. 로컬 분석을 먼저 합니다.
+5. 꼭 필요할 때만 VM, 원격 서버, instance를 발급합니다.
+6. flag 후보를 검증합니다.
+7. high-confidence일 때 제출합니다.
+8. accepted이면 한국어 writeup을 작성합니다.
+9. cleanup 후 다음 문제로 넘어갑니다.
+
+중간 보고를 위해 멈추지 않습니다. 사용자가 물으면 짧게 답하고, 답한 뒤 계속 진행합니다. 멈추는 조건은 사용자의 중단 지시, 대회 종료, 모든 문제가 solved 처리됨, 또는 모든 남은 문제가 충분히 stalled 기록됨뿐입니다.
+
+### 5. 제출
+
+제출은 high-confidence 후보에 대해서만 합니다. 중복 제출, fake-like 후보, 이미 wrong 처리된 후보는 피합니다.
+
+로컬 터미널에는 raw flag를 출력해도 됩니다. 단, 대회 중 flag, exploit, solver, writeup을 public repo, public paste, public issue, public snapshot, public writeup, 외부 공개 경로에 업로드/커밋/푸시/붙여넣기 하지 않습니다.
+
+### 6. 라이트업
+
+writeup은 accepted된 문제만 한국어로 작성합니다.
+
+파일명:
+
+```text
+[분야]문제명_WriteUp.md
+```
+
+포함할 내용:
+
+- 문제 개요
+- 풀이 과정
+- 취약점 또는 핵심 원리
+- 실행 방법
+- 제출 결과
+- exploit/solver code 전체
+- 정리
+
+못 푼 문제, stalled 문제, 팀원이 풀었지만 내 accepted 증거가 없는 문제의 writeup은 작성하지 않습니다. 그런 문제는 `memory.md`, `evidence.md`, `attempts.md`, `next_steps.md`, `operator_notes.md`에 compact handoff만 남깁니다.
+
+### 7. Cleanup
+
+accepted 또는 stalled 처리 후에는 불필요한 임시 파일을 정리합니다. 원격 서버, VM, instance, callback, tunnel 같은 리소스를 만들었다면 상태와 종료 필요 여부를 기록하고 정리합니다.
+
+### 8. Metrics
+
+metrics는 로컬 운영 상태를 보는 용도입니다. public-safe snapshot에는 hash, length, status, confidence, high-level blocker만 들어가야 합니다. raw flag, raw candidate, token, cookie, session, csrf_token, storage_state, private key, auth header, private artifact 내용은 public snapshot에 넣지 않습니다.
+
+대회가 끝난 뒤에만 public-safe snapshot을 만들 수 있습니다. 대회 중 public upload/commit/paste/writeup은 금지입니다.
+
+## Advanced / Reference
+
+This guide is the user-facing operating manual for the interactive Codex swarm workflow. Commands use placeholders only. Local terminal output may include raw flags when needed for solving, verification, and local operator visibility. Keep real contest URLs, cookies, tokens, browser storage, downloads, writeups, and raw flags outside this repository, public snapshots, public pastes, and public services.
 
 ## 1. Operating Model
 
@@ -347,7 +451,7 @@ ctfctl interactive external-solved --contest-id "$CONTEST_ID" --challenge <id> -
 Write accepted-only writeups:
 
 ```bash
-ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko,en --include-code --json
+ctfctl interactive writeup --contest-id "$CONTEST_ID" --challenge-id <id> --category <category> --languages ko --include-code --json
 ```
 
 Safe cleanup:
@@ -369,14 +473,13 @@ Then paste the short sanitized note into the affected Codex terminal. Local term
 
 ## 8. Writeup Policy
 
-Only write a writeup after an accepted solve is confirmed. For each accepted challenge, create two files:
+Only write a writeup after an accepted solve is confirmed. The Korean contest template policy creates one Korean file:
 
 ```text
-[category]ChallengeNameWriteup.ko.md
-[category]ChallengeNameWriteup.en.md
+[category]ChallengeName_WriteUp.md
 ```
 
-If solver or exploit code exists, include the complete code in fenced markdown blocks. Do not write a public-style writeup for unsolved, skipped, or stalled problems. For unsolved problems, leave only local `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records.
+If solver or exploit code exists, include the complete code in fenced markdown blocks. Do not write a public-style writeup for unsolved, skipped, or stalled problems. For unsolved problems, leave only local `memory`, `evidence`, `attempts`, `next_steps`, `operator_notes`, and `stalled` records. The advanced command still supports explicit multi-language local output, but public-facing contest handoff should follow accepted-only Korean writeups.
 
 ## 8.1. Interactive Metrics
 
